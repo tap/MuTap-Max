@@ -1,0 +1,6 @@
+[submodule "source/min-api"]
+	path = source/min-api
+	url = https://github.com/Cycling74/min-api.git
+[submodule "submodules/MuTap"]
+	path = submodules/MuTap
+	url = https://github.com/tap/MuTap.git

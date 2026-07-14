@@ -1,0 +1,70 @@
+name: CI
+
+# Builds the MuTap-Max externals via the Min-DevKit CMake on macOS (universal
+# x86_64 + arm64 .mxo) and Windows (.mxe64), checking the 1 external comes out.
+# Both this repo and the MuTap submodule are public, so the default
+# GITHUB_TOKEN suffices for the recursive checkout.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    name: build (macos)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout (recursive — pulls min-api + MuTap)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure (universal)
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Verify 1 universal external
+        run: |
+          set -euo pipefail
+          count=$(ls -d externals/*.mxo | wc -l | tr -d ' ')
+          echo "built $count externals"
+          if [ "$count" -ne 1 ]; then
+            echo "::error::expected 1 external, got $count"; exit 1
+          fi
+          fail=0
+          for mxo in externals/*.mxo; do
+            bin="$mxo/Contents/MacOS/$(basename "$mxo" .mxo)"
+            archs=$(lipo -archs "$bin")
+            echo "  $(basename "$mxo"): $archs"
+            [ "$archs" = "x86_64 arm64" ] || fail=1
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::one or more externals are not universal (x86_64 arm64)"; exit 1
+          fi
+          echo "all externals are universal"
+
+  windows:
+    name: build (windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout (recursive — pulls min-api + MuTap)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Verify 1 external (.mxe64)
+        shell: pwsh
+        run: |
+          $ext = Get-ChildItem -Recurse externals -Filter *.mxe64
+          Write-Host "built $($ext.Count) externals"
+          $ext | ForEach-Object { Write-Host "  $($_.Name)" }
+          if ($ext.Count -ne 1) { throw "expected 1 .mxe64 external, got $($ext.Count)" }
+          Write-Host "all externals built"
