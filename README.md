@@ -34,9 +34,13 @@ Early scaffold. One object landed so far:
   ratio 4, default on — changing it rebuilds), `warp` (near-end model:
   off = the speech cascade, on = the frequency-warped LP for music/tonal
   sources — sustained low chords whose packed bass partials defeat the
-  speech model; warp keeps the IPC step scaling on regardless of `gate`
-  because the warped whitener requires it for room-robust stability —
-  changing it rebuilds). `reset` message zeroes the
+  speech model; with the classic engine, warp keeps the IPC step scaling on
+  regardless of `gate` because the warped whitener requires it for
+  room-robust stability — changing it rebuilds), `kalman` (adaptive engine:
+  off = the classic NLMS update, on = the frequency-domain Kalman filter,
+  MuTap's v2 core — `mu` is ignored, `gate` selects the burst floor
+  instead, the IPC outlet reports 0, and the warped model needs no IPC
+  pairing — changing it rebuilds). `reset` message zeroes the
   learned filter. **Adds exactly `block` samples of latency** on the cleaned
   output (the block-processing hop), independent of the host vector size.
 

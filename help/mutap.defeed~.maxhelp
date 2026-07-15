@@ -340,7 +340,7 @@
      "numoutlets": 1,
      "patching_rect": [
       480.0,
-      330.0,
+      360.0,
       44.0,
       22.0
      ],
@@ -358,7 +358,7 @@
      "numoutlets": 0,
      "patching_rect": [
       530.0,
-      330.0,
+      360.0,
       300.0,
       20.0
      ],
@@ -373,7 +373,7 @@
      "numoutlets": 1,
      "patching_rect": [
       480.0,
-      300.0,
+      330.0,
       80.0,
       22.0
      ],
@@ -391,7 +391,7 @@
      "numoutlets": 0,
      "patching_rect": [
       566.0,
-      300.0,
+      330.0,
       380.0,
       20.0
      ],
@@ -463,6 +463,58 @@
      ],
      "outlettype": [],
      "text": "frequency-warped near-end model for music/tonal sources (default off; rebuilds, keeps IPC scaling on)"
+    }
+   },
+   {
+    "box": {
+     "id": "obj-27",
+     "maxclass": "toggle",
+     "numinlets": 1,
+     "numoutlets": 1,
+     "patching_rect": [
+      480.0,
+      264.0,
+      24.0,
+      24.0
+     ],
+     "outlettype": [
+      "int"
+     ],
+     "parameter_enable": 0
+    }
+   },
+   {
+    "box": {
+     "id": "obj-28",
+     "maxclass": "message",
+     "numinlets": 2,
+     "numoutlets": 1,
+     "patching_rect": [
+      510.0,
+      288.0,
+      80.0,
+      22.0
+     ],
+     "outlettype": [
+      ""
+     ],
+     "text": "kalman $1"
+    }
+   },
+   {
+    "box": {
+     "id": "obj-29",
+     "maxclass": "comment",
+     "numinlets": 1,
+     "numoutlets": 0,
+     "patching_rect": [
+      596.0,
+      288.0,
+      400.0,
+      20.0
+     ],
+     "outlettype": [],
+     "text": "v2 Kalman engine: mu ignored, gate = burst floor (default off; rebuilds)"
     }
    }
   ],
@@ -651,6 +703,30 @@
     "patchline": {
      "source": [
       "obj-25",
+      0
+     ],
+     "destination": [
+      "obj-4",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "source": [
+      "obj-27",
+      0
+     ],
+     "destination": [
+      "obj-28",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "source": [
+      "obj-28",
       0
      ],
      "destination": [
