@@ -507,7 +507,7 @@
       20.0
      ],
      "outlettype": [],
-     "text": "frequency-warped near-end model for music/tonal far ends (default off; rebuilds)"
+     "text": "frequency-warped near-end model for music/tonal material in the room (default off; rebuilds)"
     }
    },
    {
