@@ -7,7 +7,7 @@
 <c74object name='mutap.defeed~' category='audio,  adaptive,  feedback,  howling,  cleaning'>
 
 	<digest>Acoustic feedback (howling) canceller</digest>
-	<description>Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the loudspeaker-to-microphone feedback path from the microphone signal, adapted with PEM prewhitening so the closed loop does not bias the estimate (FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the signal feeding the loudspeaker; the cleaned output is delayed by @block samples. The right outlet reports the IPC double-talk indicator (0..1). </description>
+	<description>Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the loudspeaker-to-microphone feedback path from the microphone signal, adapted with PEM prewhitening so the closed loop does not bias the estimate (FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the signal feeding the loudspeaker; the cleaned output is delayed by @block samples. The right outlet reports the IPC double-talk indicator (0..1). @warp selects the frequency-warped near-end model for music/tonal sources. </description>
 
 
 	<!--METADATA-->
@@ -63,7 +63,12 @@
 
 		<attribute name='gate' get='1' set='1' type='long' size='1' >
 			<digest>Double-talk robustness layer</digest>
-			<description>Robustness layer for double-talk: scale the step size by IPC^2 and skip updates on near-end transients (transient freeze ratio 4). Changing it rebuilds the canceller from scratch (the learned filter resets). </description>
+			<description>Robustness layer for double-talk: scale the step size by IPC^2 and skip updates on near-end transients (transient freeze ratio 4). Changing it rebuilds the canceller from scratch (the learned filter resets). With warp on, the IPC step scaling stays on even when gate is off — the warped model requires it. </description>
+		</attribute>
+
+		<attribute name='warp' get='1' set='1' type='long' size='1' >
+			<digest>Frequency-warped (music/tonal) near-end model</digest>
+			<description>Near-end model: off = the speech cascade (short-term LP + pitch tap), on = the frequency-warped LP built for music/tonal sources — sustained low chords whose packed bass partials defeat the speech model. Warp keeps IPC step scaling on regardless of gate (the warped whitener requires it for room-robust stability). Changing it rebuilds the canceller from scratch (the learned filter resets). </description>
 		</attribute>
 
 	</attributelist>

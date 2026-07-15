@@ -31,7 +31,12 @@ Early scaffold. One object landed so far:
   changing it rebuilds the canceller), `mu` (NLMS step size in (0, 2),
   default 0.5, applied live), `adapt` (freeze/resume adaptation, default
   on), `gate` (the M4 robustness layer: IPC² step scaling + transient freeze
-  ratio 4, default on — changing it rebuilds). `reset` message zeroes the
+  ratio 4, default on — changing it rebuilds), `warp` (near-end model:
+  off = the speech cascade, on = the frequency-warped LP for music/tonal
+  sources — sustained low chords whose packed bass partials defeat the
+  speech model; warp keeps the IPC step scaling on regardless of `gate`
+  because the warped whitener requires it for room-robust stability —
+  changing it rebuilds). `reset` message zeroes the
   learned filter. **Adds exactly `block` samples of latency** on the cleaned
   output (the block-processing hop), independent of the host vector size.
 
@@ -108,8 +113,10 @@ next. Status of this repo against it:
   and has **not yet been exercised in a running Max** — the help patcher's
   live mic→speaker loop is also the in-Max verification checklist (added
   stable gain by ear, IPC metering, `adapt`/`gate` A/B).
-- Later: echo-cancellation objects over the same FDAF core; predictor
-  selection as an attribute once the core grows a second near-end model.
+- Predictor selection landed as the `@warp` attribute (the core's
+  frequency-warped music/tonal near-end model, paired with the IPC step
+  scaling it requires).
+- Later: echo-cancellation objects over the same FDAF core.
 
 Note the externals compile as **C++20** (MuTap requires it); each project's
 CMakeLists re-raises `CXX_STANDARD` after `min-posttarget.cmake` pins it to 17.

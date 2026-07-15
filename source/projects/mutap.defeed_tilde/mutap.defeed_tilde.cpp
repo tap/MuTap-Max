@@ -5,7 +5,11 @@
 /// frequency-domain adaptive filter whose update is decorrelated from the
 /// near-end source by prediction-error-method prewhitening — the closed loop
 /// biases any naive adaptive estimate, and the PEM prewhitening removes that
-/// bias; Gil-Cacho et al. 2014, Rombouts et al. 2007).
+/// bias; Gil-Cacho et al. 2014, Rombouts et al. 2007). @warp swaps the
+/// speech-cascade near-end model for the frequency-warped one built for
+/// music/tonal material (mutap::warped_lpc_predictor), and keeps IPC step
+/// scaling on while it is active — the warped whitener requires it for
+/// room-robust closed-loop stability (see include/mutap/lpc.h in MuTap).
 ///
 /// Signal inlet 0 is the microphone signal y; signal inlet 1 is the
 /// loudspeaker/reference signal u (the signal the patch sends to the
@@ -37,6 +41,7 @@
 #include <cstddef>
 #include <memory>
 #include <mutex>
+#include <variant>
 #include <vector>
 
 #include "c74_min.h"
@@ -45,18 +50,24 @@
 using namespace c74::min;
 
 class mutap_defeed : public object<mutap_defeed>, public vector_operator<> {
+    using speech_afc = mutap::pem_afc<double>;
+    using warped_afc = mutap::pem_afc<double, mutap::warped_lpc_predictor<double>>;
+
     /// One canceller plus its vector-size bridging buffers, all sized for one
     /// block. Built on the control thread; used (and only used) on the audio
-    /// thread after ownership is handed over.
+    /// thread after ownership is handed over. The variant selects the
+    /// near-end model (@warp); the audio thread dispatches with std::visit,
+    /// which never allocates.
     struct engine {
-        mutap::pem_afc<double> afc;
-        std::vector<double>    u_block; ///< gathering reference (loudspeaker) samples
-        std::vector<double>    y_block; ///< gathering microphone samples
-        std::vector<double>    e_block; ///< last processed block, being played out
-        size_t                 fill{0}; ///< samples gathered so far, == play-out position
+        std::variant<speech_afc, warped_afc> afc;
+        std::vector<double>                  u_block; ///< gathering reference (loudspeaker) samples
+        std::vector<double>                  y_block; ///< gathering microphone samples
+        std::vector<double>                  e_block; ///< last processed block, being played out
+        size_t                               fill{0}; ///< samples gathered so far, == play-out position
 
-        explicit engine(const mutap::pem_afc<double>::config& cfg)
-            : afc(cfg)
+        template <typename Afc>
+        explicit engine(std::in_place_type_t<Afc> which, const typename Afc::config& cfg)
+            : afc(which, cfg)
             , u_block(cfg.fdaf.block_size, 0.0)
             , y_block(cfg.fdaf.block_size, 0.0)
             , e_block(cfg.fdaf.block_size, 0.0) {}
@@ -79,6 +90,7 @@ class mutap_defeed : public object<mutap_defeed>, public vector_operator<> {
     long       m_filter_length{2048}; ///< requested filter length, samples (creation arg)
     long       m_block_size{256};     ///< requested canceller block size, samples
     bool       m_gate{true};          ///< IPC/transient robustness layer on rebuilds
+    bool       m_warp{false};         ///< frequency-warped (music) near-end model on rebuilds
     bool       m_constructed{false};  ///< guards publish() until the constructor body ran
 
     // Scalar controls applied by the audio thread every vector (no rebuild).
@@ -106,7 +118,8 @@ class mutap_defeed : public object<mutap_defeed>, public vector_operator<> {
                     "with PEM prewhitening so the closed loop does not bias the estimate "
                     "(FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the "
                     "signal feeding the loudspeaker; the cleaned output is delayed by @block samples. "
-                    "The right outlet reports the IPC double-talk indicator (0..1)."};
+                    "The right outlet reports the IPC double-talk indicator (0..1). @warp selects "
+                    "the frequency-warped near-end model for music/tonal sources."};
     MIN_TAGS{"audio, adaptive, feedback, howling, cleaning"};
     MIN_AUTHOR{"MuTap contributors"};
     MIN_RELATED{"adc~, dac~, adoutput~"};
@@ -182,10 +195,30 @@ return {value};
 attribute<bool>             gate{this, "gate", true,
                      description{"Robustness layer for double-talk: scale the step size by IPC^2 and skip "
                                              "updates on near-end transients (transient freeze ratio 4). Changing it "
-                                             "rebuilds the canceller from scratch (the learned filter resets)."},
+                                             "rebuilds the canceller from scratch (the learned filter resets). With "
+                                             "@warp on, the IPC step scaling stays on even when @gate is off — the "
+                                             "warped model requires it."},
                      setter{MIN_FUNCTION{const bool value = args[0];
 std::lock_guard<std::mutex> lock(m_control_mutex);
 m_gate = value;
+if (m_constructed) {
+    publish();
+}
+return {value};
+}
+}
+}
+;
+
+attribute<bool>             warp{this, "warp", false,
+                     description{"Near-end model: off = the speech cascade (short-term LP + pitch tap), on = the "
+                                             "frequency-warped LP built for music/tonal sources — sustained low chords whose "
+                                             "packed bass partials defeat the speech model. Warp keeps IPC step scaling on "
+                                             "regardless of @gate (the warped whitener requires it for room-robust stability). "
+                                             "Changing it rebuilds the canceller from scratch (the learned filter resets)."},
+                     setter{MIN_FUNCTION{const bool value = args[0];
+std::lock_guard<std::mutex> lock(m_control_mutex);
+m_warp = value;
 if (m_constructed) {
     publish();
 }
@@ -234,52 +267,59 @@ void operator()(audio_bundle input, audio_bundle output) {
     }
 
     engine& eng = *m_active;
-    eng.afc.set_adaptation(m_adapt.load(std::memory_order_relaxed));
-    eng.afc.fdaf().set_step_size(m_mu.load(std::memory_order_relaxed));
-    if (m_reset_request.exchange(false, std::memory_order_relaxed)) {
-        eng.afc.reset();
-        std::fill(eng.u_block.begin(), eng.u_block.end(), 0.0);
-        std::fill(eng.y_block.begin(), eng.y_block.end(), 0.0);
-        std::fill(eng.e_block.begin(), eng.e_block.end(), 0.0);
-        eng.fill = 0;
-    }
-
-    // Vector-size bridging: gather into the block buffers, process every
-    // time a block fills, play the processed block back out — exactly
-    // block_size samples of latency, for host vectors smaller or larger
-    // than the block. Inputs are read before the output is written because
-    // Max may alias output buffers onto input buffers.
-    const size_t b = eng.afc.block_size();
-    for (auto i = 0; i < frames; ++i) {
-        const double u        = u_in[i];
-        const double y        = y_in[i];
-        out[i]                = eng.e_block[eng.fill];
-        eng.u_block[eng.fill] = u;
-        eng.y_block[eng.fill] = y;
-        if (++eng.fill == b) {
-            eng.afc.process_block(eng.u_block.data(), eng.y_block.data(), eng.e_block.data());
-            eng.fill = 0;
-            if (--m_report_countdown <= 0) {
-                m_report_countdown = k_ipc_report_blocks;
-                m_ipc_atoms[0]     = eng.afc.ipc();
-                m_ipc_out.send(m_ipc_atoms);
+    std::visit(
+        [&](auto& afc) {
+            afc.set_adaptation(m_adapt.load(std::memory_order_relaxed));
+            afc.fdaf().set_step_size(m_mu.load(std::memory_order_relaxed));
+            if (m_reset_request.exchange(false, std::memory_order_relaxed)) {
+                afc.reset();
+                std::fill(eng.u_block.begin(), eng.u_block.end(), 0.0);
+                std::fill(eng.y_block.begin(), eng.y_block.end(), 0.0);
+                std::fill(eng.e_block.begin(), eng.e_block.end(), 0.0);
+                eng.fill = 0;
             }
-        }
-    }
+
+            // Vector-size bridging: gather into the block buffers, process
+            // every time a block fills, play the processed block back out —
+            // exactly block_size samples of latency, for host vectors smaller
+            // or larger than the block. Inputs are read before the output is
+            // written because Max may alias output buffers onto input buffers.
+            const size_t b = afc.block_size();
+            for (auto i = 0; i < frames; ++i) {
+                const double u        = u_in[i];
+                const double y        = y_in[i];
+                out[i]                = eng.e_block[eng.fill];
+                eng.u_block[eng.fill] = u;
+                eng.y_block[eng.fill] = y;
+                if (++eng.fill == b) {
+                    afc.process_block(eng.u_block.data(), eng.y_block.data(), eng.e_block.data());
+                    eng.fill = 0;
+                    if (--m_report_countdown <= 0) {
+                        m_report_countdown = k_ipc_report_blocks;
+                        m_ipc_atoms[0]     = afc.ipc();
+                        m_ipc_out.send(m_ipc_atoms);
+                    }
+                }
+            }
+        },
+        eng.afc);
 }
 
 private:
-/// Assemble the pem_afc config from the current control-side state. The
-/// clamping in the setters keeps every constraint satisfied, so the
-/// canceller constructor does not throw for any reachable combination.
-mutap::pem_afc<double>::config make_config() const {
-    mutap::pem_afc<double>::config cfg;
-    const auto                     b = static_cast<size_t>(m_block_size);
-    cfg.fdaf.block_size              = b;
-    cfg.fdaf.partitions              = std::max<size_t>(1, (static_cast<size_t>(m_filter_length) + b - 1) / b);
-    cfg.fdaf.step_size               = m_mu.load(std::memory_order_relaxed);
-    cfg.fdaf.ipc_step_scaling        = m_gate;
-    cfg.fdaf.transient_freeze_ratio  = m_gate ? 4.0 : 0.0;
+/// Assemble a pem_afc config from the current control-side state; the two
+/// instantiations share every field this external sets (the predictor
+/// configs differ, but both have analysis_capacity). The clamping in the
+/// setters keeps every constraint satisfied, so the canceller constructor
+/// does not throw for any reachable combination.
+template <typename Afc>
+typename Afc::config make_config() const {
+    typename Afc::config cfg;
+    const auto           b          = static_cast<size_t>(m_block_size);
+    cfg.fdaf.block_size             = b;
+    cfg.fdaf.partitions             = std::max<size_t>(1, (static_cast<size_t>(m_filter_length) + b - 1) / b);
+    cfg.fdaf.step_size              = m_mu.load(std::memory_order_relaxed);
+    cfg.fdaf.ipc_step_scaling       = m_gate || m_warp; // the warped whitener requires the IPC scale
+    cfg.fdaf.transient_freeze_ratio = m_gate ? 4.0 : 0.0;
     // analysis_window must be a multiple of block_size and >= 2 * block_size;
     // both operands are powers of two, so the max is always a multiple.
     cfg.analysis_window             = std::max<size_t>(2 * b, 1024);
@@ -292,7 +332,8 @@ mutap::pem_afc<double>::config make_config() const {
 void publish() {
     delete m_trash.exchange(nullptr, std::memory_order_acq_rel); // reap
     try {
-        auto eng = std::make_unique<engine>(make_config());
+        auto eng = m_warp ? std::make_unique<engine>(std::in_place_type<warped_afc>, make_config<warped_afc>())
+                          : std::make_unique<engine>(std::in_place_type<speech_afc>, make_config<speech_afc>());
         // A still-unadopted previous pending engine comes back to us here
         // and is deleted — the audio thread only ever sees the newest one.
         delete m_pending.exchange(eng.release(), std::memory_order_acq_rel);
