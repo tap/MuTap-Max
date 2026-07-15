@@ -1,25 +1,30 @@
 /// @file
-/// mutap.defeed~ — acoustic feedback (howling) canceller: subtract an adaptive
-/// estimate of the loudspeaker→microphone feedback path from the microphone
-/// signal. Wraps mutap::pem_afc<double> (FDAF-PEM-AFROW: a partitioned-block
-/// frequency-domain adaptive filter whose update is decorrelated from the
-/// near-end source by prediction-error-method prewhitening — the closed loop
-/// biases any naive adaptive estimate, and the PEM prewhitening removes that
-/// bias; Gil-Cacho et al. 2014, Rombouts et al. 2007). @warp swaps the
-/// speech-cascade near-end model for the frequency-warped one built for
-/// music/tonal material (mutap::warped_lpc_predictor), and keeps IPC step
-/// scaling on while it is active — the warped whitener requires it for
-/// room-robust closed-loop stability (see include/mutap/lpc.h in MuTap).
-/// @kalman swaps the NLMS core for the frequency-domain Kalman filter
-/// (mutap::partitioned_fdkf, the v2 engine): @mu is ignored, @gate selects
-/// the burst floor, and the warped model needs no IPC pairing there.
+/// mutap.aec~ — acoustic echo canceller: subtract an adaptive estimate of the
+/// loudspeaker→microphone echo path from the microphone signal. The open-loop
+/// cousin of mutap.afc~: here a CLEAN far-end reference exists (the signal
+/// the patch sends to the speaker), so nothing the canceller does feeds back
+/// around — what survives from the feedback problem is DOUBLE-TALK, the
+/// near-end talker speaking over the echo. Wraps the same
+/// mutap::pem_afc<double> engines as mutap.afc~ (the paper the PEM structure
+/// implements — Gil-Cacho et al. 2014 — is an open-loop double-talk-robust
+/// AEC framework before MuTap borrowed it for feedback): the near-end model
+/// is re-fit every block and whitened out of the adaptive update, which is
+/// what lets adaptation keep running through double-talk without a
+/// double-talk detector. @warp swaps the speech-cascade near-end model for
+/// the frequency-warped one built for music/tonal material (it won the
+/// measured music double-talk suppression in every room tried — see
+/// tests/test_aec.cpp in MuTap). @kalman swaps the NLMS core for the
+/// frequency-domain Kalman filter (v2): @mu is ignored, @gate selects the
+/// burst floor — and it is the measured double-talk winner (the near-end PSD
+/// it tracks per bin is exactly a double-talk model).
 ///
-/// Signal inlet 0 is the microphone signal y; signal inlet 1 is the
-/// loudspeaker/reference signal u (the signal the patch sends to the
-/// speaker). Signal outlet 0 is the cleaned signal e = y - F_hat u; the
-/// rightmost outlet reports the IPC double-talk indicator (0..1, low =
-/// near-end speech dominates, high = feedback dominates) every few processed
-/// blocks.
+/// Signal inlet 0 is the microphone signal y (echo + near end); signal
+/// inlet 1 is the far-end reference x — the signal the patch sends to the
+/// loudspeaker, tapped where it actually reaches the speaker. Signal
+/// outlet 0 is the cleaned signal e = y - F_hat x (the near end with the
+/// echo removed); the rightmost outlet reports the IPC double-talk
+/// indicator (0..1, low = near-end speech dominates, high = unmodeled echo
+/// dominates) every few processed blocks.
 ///
 /// The canceller works on fixed blocks of @block samples, independent of the
 /// host signal vector size: the perform routine gathers samples into
@@ -53,11 +58,11 @@
 
 using namespace c74::min;
 
-class mutap_defeed : public object<mutap_defeed>, public vector_operator<> {
-    using speech_afc        = mutap::pem_afc<double>;
-    using warped_afc        = mutap::pem_afc<double, mutap::warped_lpc_predictor<double>>;
-    using kalman_speech_afc = mutap::pem_afc<double, mutap::speech_predictor<double>, mutap::partitioned_fdkf<double>>;
-    using kalman_warped_afc =
+class mutap_aec : public object<mutap_aec>, public vector_operator<> {
+    using speech_aec        = mutap::pem_afc<double>;
+    using warped_aec        = mutap::pem_afc<double, mutap::warped_lpc_predictor<double>>;
+    using kalman_speech_aec = mutap::pem_afc<double, mutap::speech_predictor<double>, mutap::partitioned_fdkf<double>>;
+    using kalman_warped_aec =
         mutap::pem_afc<double, mutap::warped_lpc_predictor<double>, mutap::partitioned_fdkf<double>>;
 
     /// One canceller plus its vector-size bridging buffers, all sized for one
@@ -66,16 +71,16 @@ class mutap_defeed : public object<mutap_defeed>, public vector_operator<> {
     /// near-end model (@warp); the audio thread dispatches with std::visit,
     /// which never allocates.
     struct engine {
-        std::variant<speech_afc, warped_afc, kalman_speech_afc, kalman_warped_afc> afc;
-        std::vector<double> u_block; ///< gathering reference (loudspeaker) samples
+        std::variant<speech_aec, warped_aec, kalman_speech_aec, kalman_warped_aec> aec;
+        std::vector<double> x_block; ///< gathering far-end (reference) samples
         std::vector<double> y_block; ///< gathering microphone samples
         std::vector<double> e_block; ///< last processed block, being played out
         size_t              fill{0}; ///< samples gathered so far, == play-out position
 
-        template <typename Afc>
-        explicit engine(std::in_place_type_t<Afc> which, const typename Afc::config& cfg)
-            : afc(which, cfg)
-            , u_block(cfg.fdaf.block_size, 0.0)
+        template <typename Aec>
+        explicit engine(std::in_place_type_t<Aec> which, const typename Aec::config& cfg)
+            : aec(which, cfg)
+            , x_block(cfg.fdaf.block_size, 0.0)
             , y_block(cfg.fdaf.block_size, 0.0)
             , e_block(cfg.fdaf.block_size, 0.0) {}
     };
@@ -121,26 +126,28 @@ class mutap_defeed : public object<mutap_defeed>, public vector_operator<> {
     atoms   m_ipc_atoms{0.0};
 
   public:
-    MIN_DESCRIPTION{"Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the "
-                    "loudspeaker-to-microphone feedback path from the microphone signal, adapted "
-                    "with PEM prewhitening so the closed loop does not bias the estimate "
-                    "(FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the "
-                    "signal feeding the loudspeaker; the cleaned output is delayed by @block samples. "
-                    "The right outlet reports the IPC double-talk indicator (0..1). @warp selects "
-                    "the frequency-warped near-end model for music/tonal sources; @kalman selects "
-                    "the frequency-domain Kalman engine (v2)."};
-    MIN_TAGS{"audio, adaptive, feedback, howling, cleaning"};
+    MIN_DESCRIPTION{"Acoustic echo canceller. Subtracts an adaptive estimate of the "
+                    "loudspeaker-to-microphone echo path from the microphone signal — the open-loop "
+                    "cousin of mutap.afc~, for the case where a clean far-end reference exists. "
+                    "Adaptation runs on a PEM-prewhitened signal pair, so it survives double-talk "
+                    "without a double-talk detector (FDAF-PEM, MuTap pem_afc). Inlet 1 takes the "
+                    "microphone, inlet 2 the far-end signal feeding the loudspeaker; the cleaned "
+                    "output is delayed by @block samples. The right outlet reports the IPC "
+                    "double-talk indicator (0..1). @warp selects the frequency-warped near-end model "
+                    "for music/tonal sources; @kalman selects the frequency-domain Kalman engine "
+                    "(v2), the measured double-talk winner."};
+    MIN_TAGS{"audio, adaptive, echo, cleaning"};
     MIN_AUTHOR{"MuTap contributors"};
-    MIN_RELATED{"adc~, dac~, adoutput~"};
+    MIN_RELATED{"mutap.afc~, adc~, dac~, adoutput~"};
 
-    inlet<>  m_in_mic{this, "(signal) microphone signal y"};
-    inlet<>  m_in_ref{this, "(signal) loudspeaker / reference signal u"};
-    outlet<> m_out{this, "(signal) cleaned signal e = y - estimated feedback", "signal"};
+    inlet<>  m_in_mic{this, "(signal) microphone signal y (echo + near end)"};
+    inlet<>  m_in_ref{this, "(signal) far-end / reference signal x (the signal sent to the loudspeaker)"};
+    outlet<> m_out{this, "(signal) cleaned signal e = y - estimated echo", "signal"};
     outlet<thread_check::scheduler, thread_action::fifo> m_ipc_out{this, "(float) IPC double-talk indicator, 0..1"};
 
-    /// First creation argument is the feedback-path filter length in samples
+    /// First creation argument is the echo-path filter length in samples
     /// (default 2048); partitions = ceil(filter_length / block size).
-    explicit mutap_defeed(const atoms& args = {}) {
+    explicit mutap_aec(const atoms& args = {}) {
         if (!args.empty()) {
             m_filter_length = std::clamp(static_cast<long>(args[0]), k_min_block, k_max_filter_length);
         }
@@ -149,7 +156,7 @@ class mutap_defeed : public object<mutap_defeed>, public vector_operator<> {
         publish();
     }
 
-    ~mutap_defeed() {
+    ~mutap_aec() {
         // DSP is torn down before the object is freed; every live engine is
         // in exactly one of these three places.
         delete m_pending.exchange(nullptr);
@@ -191,7 +198,7 @@ return {clamped};
 ;
 
 attribute<bool> adapt{this, "adapt", true,
-                      description{"Enable adaptation. Off freezes the learned feedback-path estimate; "
+                      description{"Enable adaptation. Off freezes the learned echo-path estimate; "
                                   "cancellation keeps running with the frozen filter."},
                       setter{MIN_FUNCTION{const bool value = args[0];
 m_adapt.store(value, std::memory_order_relaxed);
@@ -202,11 +209,13 @@ return {value};
 ;
 
 attribute<bool>             gate{this, "gate", true,
-                     description{"Robustness layer for double-talk: scale the step size by IPC^2 and skip "
-                                             "updates on near-end transients (transient freeze ratio 4). Changing it "
-                                             "rebuilds the canceller from scratch (the learned filter resets). With "
-                                             "@warp on, the IPC step scaling stays on even when @gate is off — the "
-                                             "warped model requires it."},
+                     description{"Robustness layer for double-talk on the classic engine: scale the step "
+                                             "size by IPC^2 and skip updates on near-end transients (transient freeze "
+                                             "ratio 4). Freezing through double-talk is the classical AEC answer; the "
+                                             "PEM prewhitening already removes most of the need, and the Kalman engine "
+                                             "all of it. Changing it rebuilds the canceller from scratch (the learned "
+                                             "filter resets). With @warp on, the IPC step scaling stays on even when "
+                                             "@gate is off — the warped model requires it."},
                      setter{MIN_FUNCTION{const bool value = args[0];
 std::lock_guard<std::mutex> lock(m_control_mutex);
 m_gate = value;
@@ -222,9 +231,11 @@ return {value};
 attribute<bool>             warp{this, "warp", false,
                      description{"Near-end model: off = the speech cascade (short-term LP + pitch tap), on = the "
                                              "frequency-warped LP built for music/tonal sources — sustained low chords whose "
-                                             "packed bass partials defeat the speech model. Warp keeps IPC step scaling on "
-                                             "regardless of @gate (the warped whitener requires it for room-robust stability). "
-                                             "Changing it rebuilds the canceller from scratch (the learned filter resets)."},
+                                             "packed bass partials defeat the speech model. On music-material double-talk it "
+                                             "measured the better echo suppression in every room tried (MuTap test_aec.cpp). "
+                                             "Warp keeps IPC step scaling on regardless of @gate (the warped whitener "
+                                             "requires it); with the Kalman engine no pairing is needed. Changing it "
+                                             "rebuilds the canceller from scratch (the learned filter resets)."},
                      setter{MIN_FUNCTION{const bool value = args[0];
 std::lock_guard<std::mutex> lock(m_control_mutex);
 m_warp = value;
@@ -241,9 +252,11 @@ attribute<bool>             kalman{this, "kalman", false,
                        description{"Adaptive engine: off = the classic NLMS update (mu + gate), on = the "
                                                "frequency-domain Kalman filter (v2) -- per-frequency state uncertainty and "
                                                "near-end tracking replace the step size, so @mu is ignored and @gate selects "
-                                               "the burst floor instead (burst hardening at some added-stable-gain cost). "
-                                               "The IPC outlet reports 0 with the Kalman engine (its gating is internal). "
-                                               "Changing it rebuilds the canceller from scratch (the learned filter resets)."},
+                                               "the burst floor instead. For echo cancellation this is the measured "
+                                               "double-talk winner: the near-end PSD it tracks per bin is exactly a "
+                                               "double-talk model, no detector needed. The IPC outlet reports 0 with the "
+                                               "Kalman engine (its gating is internal). Changing it rebuilds the canceller "
+                                               "from scratch (the learned filter resets)."},
                        setter{MIN_FUNCTION{const bool value = args[0];
 std::lock_guard<std::mutex> lock(m_control_mutex);
 m_kalman = value;
@@ -258,7 +271,7 @@ return {value};
 
 /// Zero the learned filter and the block buffers (applied on the audio
 /// thread at the next vector, so it does not race the perform routine).
-message<> reset{this, "reset", "Reset the canceller: zero the learned feedback-path estimate.",
+message<> reset{this, "reset", "Reset the canceller: zero the learned echo-path estimate.",
                 MIN_FUNCTION{m_reset_request.store(true, std::memory_order_relaxed);
 return {};
 }
@@ -268,7 +281,7 @@ return {};
 void operator()(audio_bundle input, audio_bundle output) {
     const auto    frames = input.frame_count();
     const double* y_in   = input.samples(0);
-    const double* u_in   = input.samples(1);
+    const double* x_in   = input.samples(1);
     double*       out    = output.samples(0);
 
     // Adopt a newly published canceller, but only when the trash slot is
@@ -296,14 +309,14 @@ void operator()(audio_bundle input, audio_bundle output) {
 
     engine& eng = *m_active;
     std::visit(
-        [&](auto& afc) {
-            afc.set_adaptation(m_adapt.load(std::memory_order_relaxed));
-            if constexpr (requires { afc.fdaf().set_step_size(0.0); }) {
-                afc.fdaf().set_step_size(m_mu.load(std::memory_order_relaxed));
+        [&](auto& aec) {
+            aec.set_adaptation(m_adapt.load(std::memory_order_relaxed));
+            if constexpr (requires { aec.fdaf().set_step_size(0.0); }) {
+                aec.fdaf().set_step_size(m_mu.load(std::memory_order_relaxed));
             }
             if (m_reset_request.exchange(false, std::memory_order_relaxed)) {
-                afc.reset();
-                std::fill(eng.u_block.begin(), eng.u_block.end(), 0.0);
+                aec.reset();
+                std::fill(eng.x_block.begin(), eng.x_block.end(), 0.0);
                 std::fill(eng.y_block.begin(), eng.y_block.end(), 0.0);
                 std::fill(eng.e_block.begin(), eng.e_block.end(), 0.0);
                 eng.fill = 0;
@@ -314,25 +327,25 @@ void operator()(audio_bundle input, audio_bundle output) {
             // exactly block_size samples of latency, for host vectors smaller
             // or larger than the block. Inputs are read before the output is
             // written because Max may alias output buffers onto input buffers.
-            const size_t b = afc.block_size();
+            const size_t b = aec.block_size();
             for (auto i = 0; i < frames; ++i) {
-                const double u        = u_in[i];
+                const double x        = x_in[i];
                 const double y        = y_in[i];
                 out[i]                = eng.e_block[eng.fill];
-                eng.u_block[eng.fill] = u;
+                eng.x_block[eng.fill] = x;
                 eng.y_block[eng.fill] = y;
                 if (++eng.fill == b) {
-                    afc.process_block(eng.u_block.data(), eng.y_block.data(), eng.e_block.data());
+                    aec.process_block(eng.x_block.data(), eng.y_block.data(), eng.e_block.data());
                     eng.fill = 0;
                     if (--m_report_countdown <= 0) {
                         m_report_countdown = k_ipc_report_blocks;
-                        m_ipc_atoms[0]     = afc.ipc();
+                        m_ipc_atoms[0]     = aec.ipc();
                         m_ipc_out.send(m_ipc_atoms);
                     }
                 }
             }
         },
-        eng.afc);
+        eng.aec);
 }
 
 private:
@@ -341,9 +354,9 @@ private:
 /// configs differ, but both have analysis_capacity). The clamping in the
 /// setters keeps every constraint satisfied, so the canceller constructor
 /// does not throw for any reachable combination.
-template <typename Afc>
-typename Afc::config make_config() const {
-    typename Afc::config cfg;
+template <typename Aec>
+typename Aec::config make_config() const {
+    typename Aec::config cfg;
     const auto           b          = static_cast<size_t>(m_block_size);
     cfg.fdaf.block_size             = b;
     cfg.fdaf.partitions             = std::max<size_t>(1, (static_cast<size_t>(m_filter_length) + b - 1) / b);
@@ -359,9 +372,9 @@ typename Afc::config make_config() const {
 
 /// Same, for the Kalman-core instantiations: no step size and no IPC
 /// options exist; @gate maps to the opt-in transient (burst) floor.
-template <typename Afc>
-typename Afc::config make_kalman_config() const {
-    typename Afc::config cfg;
+template <typename Aec>
+typename Aec::config make_kalman_config() const {
+    typename Aec::config cfg;
     const auto           b          = static_cast<size_t>(m_block_size);
     cfg.fdaf.block_size             = b;
     cfg.fdaf.partitions             = std::max<size_t>(1, (static_cast<size_t>(m_filter_length) + b - 1) / b);
@@ -378,14 +391,14 @@ void publish() {
     try {
         std::unique_ptr<engine> eng;
         if (m_kalman) {
-            eng = m_warp ? std::make_unique<engine>(std::in_place_type<kalman_warped_afc>,
-                                                    make_kalman_config<kalman_warped_afc>())
-                         : std::make_unique<engine>(std::in_place_type<kalman_speech_afc>,
-                                                    make_kalman_config<kalman_speech_afc>());
+            eng = m_warp ? std::make_unique<engine>(std::in_place_type<kalman_warped_aec>,
+                                                    make_kalman_config<kalman_warped_aec>())
+                         : std::make_unique<engine>(std::in_place_type<kalman_speech_aec>,
+                                                    make_kalman_config<kalman_speech_aec>());
         }
         else {
-            eng = m_warp ? std::make_unique<engine>(std::in_place_type<warped_afc>, make_config<warped_afc>())
-                         : std::make_unique<engine>(std::in_place_type<speech_afc>, make_config<speech_afc>());
+            eng = m_warp ? std::make_unique<engine>(std::in_place_type<warped_aec>, make_config<warped_aec>())
+                         : std::make_unique<engine>(std::in_place_type<speech_aec>, make_config<speech_aec>());
         }
         // A still-unadopted previous pending engine comes back to us here
         // and is deleted — the audio thread only ever sees the newest one.
@@ -399,4 +412,4 @@ void publish() {
 }
 ;
 
-MIN_EXTERNAL(mutap_defeed);
+MIN_EXTERNAL(mutap_aec);

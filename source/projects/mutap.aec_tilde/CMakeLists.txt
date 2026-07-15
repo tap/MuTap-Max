@@ -1,4 +1,4 @@
-# mutap.defeed~ — acoustic feedback (howling) canceller.
+# mutap.aec~ — acoustic echo canceller.
 
 cmake_minimum_required(VERSION 3.19)
 
