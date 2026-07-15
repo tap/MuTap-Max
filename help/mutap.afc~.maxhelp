@@ -42,7 +42,7 @@
       400.0,
       22.0
      ],
-     "text": "mutap.defeed~",
+     "text": "mutap.afc~",
      "fontsize": 16.0
     }
    },
@@ -92,7 +92,7 @@
       160.0,
       22.0
      ],
-     "text": "mutap.defeed~ 2048",
+     "text": "mutap.afc~ 2048",
      "outlettype": [
       "signal",
       ""
@@ -145,7 +145,7 @@
       560.0,
       40.0
      ],
-     "text": "The closed loop: mic -> defeed~ -> gain -> speaker. Raise the gain slider toward howling onset; the canceller buys added stable gain. The gain~ output is tapped back into defeed~'s right inlet \u2014 the reference MUST be the signal that actually reaches the speaker."
+     "text": "The closed loop: mic -> afc~ -> gain -> speaker. Raise the gain slider toward howling onset; the canceller buys added stable gain. The gain~ output is tapped back into afc~'s right inlet \u2014 the reference MUST be the signal that actually reaches the speaker."
     }
    },
    {
@@ -410,7 +410,7 @@
       700.0,
       54.0
      ],
-     "text": "Why PEM: in a closed loop the speaker signal is correlated with your voice, so a naive adaptive filter cancels program material, not feedback. mutap.defeed~ re-fits a near-end model (LPC + pitch) every block, prewhitens both signals with it, and adapts on the whitened pair while cancelling on the raw ones (FDAF-PEM-AFROW). Creation arg = filter length in samples (default 2048); partitions = filter length / block."
+     "text": "Why PEM: in a closed loop the speaker signal is correlated with your voice, so a naive adaptive filter cancels program material, not feedback. mutap.afc~ re-fits a near-end model (LPC + pitch) every block, prewhitens both signals with it, and adapts on the whitened pair while cancelling on the raw ones (FDAF-PEM-AFROW). Creation arg = filter length in samples (default 2048); partitions = filter length / block."
     }
    },
    {

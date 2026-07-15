@@ -15,9 +15,9 @@ M5: scaffold + first external.
 
 ## Status
 
-Early scaffold. One object landed so far:
+Early scaffold. Two objects so far:
 
-- **`mutap.defeed~`** — acoustic feedback canceller. Wraps
+- **`mutap.afc~`** — acoustic feedback canceller. Wraps
   `mutap::pem_afc<double>` (FDAF-PEM-AFROW; default speech near-end
   predictor). Inlet 1 (signal): the **microphone** signal `y`; inlet 2
   (signal): the **loudspeaker/reference** signal `u` — the same signal your
@@ -44,11 +44,25 @@ Early scaffold. One object landed so far:
   learned filter. **Adds exactly `block` samples of latency** on the cleaned
   output (the block-processing hop), independent of the host vector size.
 
+- **`mutap.aec~`** — acoustic **echo** canceller: the open-loop cousin of
+  `mutap.afc~`, for the case where a clean far-end reference exists (the
+  signal your patch sends to the speaker). Same engines, same attributes,
+  same latency contract as `mutap.afc~`; what changes is the semantics —
+  inlet 2 takes the **far-end** signal `x`, and the estimate cannot feed
+  back around, so the hard case is **double-talk** (the near-end talker
+  speaking over the echo). The PEM prewhitening handles it without a
+  double-talk detector, and `@kalman 1` is the measured double-talk winner
+  in the MuTap test suite (`tests/test_aec.cpp`: at 0 dB double-talk the
+  naive update is kicked past useless while the Kalman core holds a deep
+  estimate with ~13 dB echo suppression through the segment, config-free).
+  The help patcher demonstrates fully in-patch — a delay+lowpass chain
+  stands in for the room, so no acoustic loop is needed.
+
 ### How feedback cancellation works (one paragraph)
 
 A mic and a speaker in the same room form a closed loop: the speaker signal
 `u` leaks back into the mic through the room's feedback path `F`, and past a
-critical gain the loop howls. `mutap.defeed~` adaptively identifies `F` and
+critical gain the loop howls. `mutap.afc~` adaptively identifies `F` and
 subtracts the estimate, `e = y − F̂·u`, which buys added stable gain before
 howling onset. The catch is that in a closed loop `u` is *correlated* with the
 near-end source (it IS the amplified near-end source), so a naive adaptive
@@ -86,7 +100,7 @@ MuTap is found at `submodules/MuTap` by default; override with
 git clone --recursive https://github.com/tap/MuTap-Max.git
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-# externals land in externals/ (e.g. mutap.defeed_tilde.mxo → object mutap.defeed~)
+# externals land in externals/ (e.g. mutap.afc_tilde.mxo → object mutap.afc~)
 ```
 
 To use the objects in Max, make Max see this package — symlink (or copy) the
@@ -112,7 +126,7 @@ canonical TapHouse configs).
 `HANDOFF.md` in the MuTap library repo is the authority on what gets built
 next. Status of this repo against it:
 
-- **M5 (this repo: scaffold + `mutap.defeed~`) — code complete.** The external
+- **M5 (this repo: scaffold + `mutap.afc~`) — code complete.** The external
   wraps the M4 processor (`pem_afc` with IPC gating and the transient freeze)
   and has **not yet been exercised in a running Max** — the help patcher's
   live mic→speaker loop is also the in-Max verification checklist (added
@@ -120,7 +134,9 @@ next. Status of this repo against it:
 - Predictor selection landed as the `@warp` attribute (the core's
   frequency-warped music/tonal near-end model, paired with the IPC step
   scaling it requires).
-- Later: echo-cancellation objects over the same FDAF core.
+- **Echo cancellation landed as `mutap.aec~`** (Stage 2 of the HANDOFF's
+  "next effort"): the same engine matrix run open loop, with the measured
+  double-talk behavior pinned in MuTap's `tests/test_aec.cpp`.
 
 Note the externals compile as **C++20** (MuTap requires it); each project's
 CMakeLists re-raises `CXX_STANDARD` after `min-posttarget.cmake` pins it to 17.
