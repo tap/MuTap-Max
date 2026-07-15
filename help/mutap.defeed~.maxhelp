@@ -145,7 +145,7 @@
       560.0,
       40.0
      ],
-     "text": "The closed loop: mic -> defeed~ -> gain -> speaker. Raise the gain slider toward howling onset; the canceller buys added stable gain. The gain~ output is tapped back into defeed~'s right inlet — the reference MUST be the signal that actually reaches the speaker."
+     "text": "The closed loop: mic -> defeed~ -> gain -> speaker. Raise the gain slider toward howling onset; the canceller buys added stable gain. The gain~ output is tapped back into defeed~'s right inlet \u2014 the reference MUST be the signal that actually reaches the speaker."
     }
    },
    {
@@ -412,6 +412,58 @@
      ],
      "text": "Why PEM: in a closed loop the speaker signal is correlated with your voice, so a naive adaptive filter cancels program material, not feedback. mutap.defeed~ re-fits a near-end model (LPC + pitch) every block, prewhitens both signals with it, and adapts on the whitened pair while cancelling on the raw ones (FDAF-PEM-AFROW). Creation arg = filter length in samples (default 2048); partitions = filter length / block."
     }
+   },
+   {
+    "box": {
+     "id": "obj-24",
+     "maxclass": "toggle",
+     "numinlets": 1,
+     "numoutlets": 1,
+     "patching_rect": [
+      480.0,
+      234.0,
+      24.0,
+      24.0
+     ],
+     "outlettype": [
+      "int"
+     ],
+     "parameter_enable": 0
+    }
+   },
+   {
+    "box": {
+     "id": "obj-25",
+     "maxclass": "message",
+     "numinlets": 2,
+     "numoutlets": 1,
+     "patching_rect": [
+      510.0,
+      258.0,
+      64.0,
+      22.0
+     ],
+     "outlettype": [
+      ""
+     ],
+     "text": "warp $1"
+    }
+   },
+   {
+    "box": {
+     "id": "obj-26",
+     "maxclass": "comment",
+     "numinlets": 1,
+     "numoutlets": 0,
+     "patching_rect": [
+      580.0,
+      258.0,
+      400.0,
+      20.0
+     ],
+     "outlettype": [],
+     "text": "frequency-warped near-end model for music/tonal sources (default off; rebuilds, keeps IPC scaling on)"
+    }
    }
   ],
   "lines": [
@@ -579,6 +631,30 @@
      ],
      "source": [
       "obj-21",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "source": [
+      "obj-24",
+      0
+     ],
+     "destination": [
+      "obj-25",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "source": [
+      "obj-25",
+      0
+     ],
+     "destination": [
+      "obj-4",
       0
      ]
     }
