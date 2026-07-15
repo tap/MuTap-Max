@@ -91,9 +91,14 @@ class mutap_defeed : public object<mutap_defeed>, public vector_operator<> {
     std::atomic<engine*> m_pending{nullptr};
     std::atomic<engine*> m_trash{nullptr};
 
-    // Audio-thread-only state.
+    // Audio-thread-only state. m_ipc_atoms is pre-allocated because the
+    // queue-backed outlet's scalar send() does not compile in this min-api
+    // pin (its unsafe-send path pushes the raw scalar where atoms& is
+    // expected); sending an atoms lvalue takes the path that does. The
+    // queue copy inside min-api is the same cost min.edge~ pays.
     engine* m_active{nullptr};
     long    m_report_countdown{k_ipc_report_blocks};
+    atoms   m_ipc_atoms{0.0};
 
   public:
     MIN_DESCRIPTION{"Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the "
@@ -256,7 +261,8 @@ void operator()(audio_bundle input, audio_bundle output) {
             eng.fill = 0;
             if (--m_report_countdown <= 0) {
                 m_report_countdown = k_ipc_report_blocks;
-                m_ipc_out.send(eng.afc.ipc());
+                m_ipc_atoms[0]     = eng.afc.ipc();
+                m_ipc_out.send(m_ipc_atoms);
             }
         }
     }
