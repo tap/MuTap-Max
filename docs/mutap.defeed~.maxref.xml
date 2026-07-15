@@ -7,7 +7,7 @@
 <c74object name='mutap.defeed~' category='audio,  adaptive,  feedback,  howling,  cleaning'>
 
 	<digest>Acoustic feedback (howling) canceller</digest>
-	<description>Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the loudspeaker-to-microphone feedback path from the microphone signal, adapted with PEM prewhitening so the closed loop does not bias the estimate (FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the signal feeding the loudspeaker; the cleaned output is delayed by @block samples. The right outlet reports the IPC double-talk indicator (0..1). @warp selects the frequency-warped near-end model for music/tonal sources. </description>
+	<description>Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the loudspeaker-to-microphone feedback path from the microphone signal, adapted with PEM prewhitening so the closed loop does not bias the estimate (FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the signal feeding the loudspeaker; the cleaned output is delayed by @block samples. The right outlet reports the IPC double-talk indicator (0..1). @warp selects the frequency-warped near-end model for music/tonal sources; @kalman selects the frequency-domain Kalman engine (v2). </description>
 
 
 	<!--METADATA-->
@@ -68,7 +68,12 @@
 
 		<attribute name='warp' get='1' set='1' type='long' size='1' >
 			<digest>Frequency-warped (music/tonal) near-end model</digest>
-			<description>Near-end model: off = the speech cascade (short-term LP + pitch tap), on = the frequency-warped LP built for music/tonal sources — sustained low chords whose packed bass partials defeat the speech model. Warp keeps IPC step scaling on regardless of gate (the warped whitener requires it for room-robust stability). Changing it rebuilds the canceller from scratch (the learned filter resets). </description>
+			<description>Near-end model: off = the speech cascade (short-term LP + pitch tap), on = the frequency-warped LP built for music/tonal sources — sustained low chords whose packed bass partials defeat the speech model. With the classic engine, warp keeps IPC step scaling on regardless of gate (the warped whitener requires it for room-robust stability); with the Kalman engine no pairing is needed. Changing it rebuilds the canceller from scratch (the learned filter resets). </description>
+		</attribute>
+
+		<attribute name='kalman' get='1' set='1' type='long' size='1' >
+			<digest>Frequency-domain Kalman engine (v2)</digest>
+			<description>Adaptive engine: off = the classic NLMS update (mu + gate), on = the frequency-domain Kalman filter (v2) — per-frequency state uncertainty and near-end tracking replace the step size, so mu is ignored and gate selects the burst floor instead (burst hardening at some added-stable-gain cost). The IPC outlet reports 0 with the Kalman engine (its gating is internal). Changing it rebuilds the canceller from scratch (the learned filter resets). </description>
 		</attribute>
 
 	</attributelist>

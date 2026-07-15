@@ -10,6 +10,9 @@
 /// music/tonal material (mutap::warped_lpc_predictor), and keeps IPC step
 /// scaling on while it is active — the warped whitener requires it for
 /// room-robust closed-loop stability (see include/mutap/lpc.h in MuTap).
+/// @kalman swaps the NLMS core for the frequency-domain Kalman filter
+/// (mutap::partitioned_fdkf, the v2 engine): @mu is ignored, @gate selects
+/// the burst floor, and the warped model needs no IPC pairing there.
 ///
 /// Signal inlet 0 is the microphone signal y; signal inlet 1 is the
 /// loudspeaker/reference signal u (the signal the patch sends to the
@@ -45,13 +48,17 @@
 #include <vector>
 
 #include "c74_min.h"
+#include "mutap/fd_kalman.h"
 #include "mutap/pem_afc.h"
 
 using namespace c74::min;
 
 class mutap_defeed : public object<mutap_defeed>, public vector_operator<> {
-    using speech_afc = mutap::pem_afc<double>;
-    using warped_afc = mutap::pem_afc<double, mutap::warped_lpc_predictor<double>>;
+    using speech_afc        = mutap::pem_afc<double>;
+    using warped_afc        = mutap::pem_afc<double, mutap::warped_lpc_predictor<double>>;
+    using kalman_speech_afc = mutap::pem_afc<double, mutap::speech_predictor<double>, mutap::partitioned_fdkf<double>>;
+    using kalman_warped_afc =
+        mutap::pem_afc<double, mutap::warped_lpc_predictor<double>, mutap::partitioned_fdkf<double>>;
 
     /// One canceller plus its vector-size bridging buffers, all sized for one
     /// block. Built on the control thread; used (and only used) on the audio
@@ -59,11 +66,11 @@ class mutap_defeed : public object<mutap_defeed>, public vector_operator<> {
     /// near-end model (@warp); the audio thread dispatches with std::visit,
     /// which never allocates.
     struct engine {
-        std::variant<speech_afc, warped_afc> afc;
-        std::vector<double>                  u_block; ///< gathering reference (loudspeaker) samples
-        std::vector<double>                  y_block; ///< gathering microphone samples
-        std::vector<double>                  e_block; ///< last processed block, being played out
-        size_t                               fill{0}; ///< samples gathered so far, == play-out position
+        std::variant<speech_afc, warped_afc, kalman_speech_afc, kalman_warped_afc> afc;
+        std::vector<double> u_block; ///< gathering reference (loudspeaker) samples
+        std::vector<double> y_block; ///< gathering microphone samples
+        std::vector<double> e_block; ///< last processed block, being played out
+        size_t              fill{0}; ///< samples gathered so far, == play-out position
 
         template <typename Afc>
         explicit engine(std::in_place_type_t<Afc> which, const typename Afc::config& cfg)
@@ -91,6 +98,7 @@ class mutap_defeed : public object<mutap_defeed>, public vector_operator<> {
     long       m_block_size{256};     ///< requested canceller block size, samples
     bool       m_gate{true};          ///< IPC/transient robustness layer on rebuilds
     bool       m_warp{false};         ///< frequency-warped (music) near-end model on rebuilds
+    bool       m_kalman{false};       ///< frequency-domain Kalman core (v2) on rebuilds
     bool       m_constructed{false};  ///< guards publish() until the constructor body ran
 
     // Scalar controls applied by the audio thread every vector (no rebuild).
@@ -119,7 +127,8 @@ class mutap_defeed : public object<mutap_defeed>, public vector_operator<> {
                     "(FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the "
                     "signal feeding the loudspeaker; the cleaned output is delayed by @block samples. "
                     "The right outlet reports the IPC double-talk indicator (0..1). @warp selects "
-                    "the frequency-warped near-end model for music/tonal sources."};
+                    "the frequency-warped near-end model for music/tonal sources; @kalman selects "
+                    "the frequency-domain Kalman engine (v2)."};
     MIN_TAGS{"audio, adaptive, feedback, howling, cleaning"};
     MIN_AUTHOR{"MuTap contributors"};
     MIN_RELATED{"adc~, dac~, adoutput~"};
@@ -228,6 +237,25 @@ return {value};
 }
 ;
 
+attribute<bool>             kalman{this, "kalman", false,
+                       description{"Adaptive engine: off = the classic NLMS update (mu + gate), on = the "
+                                               "frequency-domain Kalman filter (v2) -- per-frequency state uncertainty and "
+                                               "near-end tracking replace the step size, so @mu is ignored and @gate selects "
+                                               "the burst floor instead (burst hardening at some added-stable-gain cost). "
+                                               "The IPC outlet reports 0 with the Kalman engine (its gating is internal). "
+                                               "Changing it rebuilds the canceller from scratch (the learned filter resets)."},
+                       setter{MIN_FUNCTION{const bool value = args[0];
+std::lock_guard<std::mutex> lock(m_control_mutex);
+m_kalman = value;
+if (m_constructed) {
+    publish();
+}
+return {value};
+}
+}
+}
+;
+
 /// Zero the learned filter and the block buffers (applied on the audio
 /// thread at the next vector, so it does not race the perform routine).
 message<> reset{this, "reset", "Reset the canceller: zero the learned feedback-path estimate.",
@@ -270,7 +298,9 @@ void operator()(audio_bundle input, audio_bundle output) {
     std::visit(
         [&](auto& afc) {
             afc.set_adaptation(m_adapt.load(std::memory_order_relaxed));
-            afc.fdaf().set_step_size(m_mu.load(std::memory_order_relaxed));
+            if constexpr (requires { afc.fdaf().set_step_size(0.0); }) {
+                afc.fdaf().set_step_size(m_mu.load(std::memory_order_relaxed));
+            }
             if (m_reset_request.exchange(false, std::memory_order_relaxed)) {
                 afc.reset();
                 std::fill(eng.u_block.begin(), eng.u_block.end(), 0.0);
@@ -327,13 +357,36 @@ typename Afc::config make_config() const {
     return cfg;
 }
 
+/// Same, for the Kalman-core instantiations: no step size and no IPC
+/// options exist; @gate maps to the opt-in transient (burst) floor.
+template <typename Afc>
+typename Afc::config make_kalman_config() const {
+    typename Afc::config cfg;
+    const auto           b          = static_cast<size_t>(m_block_size);
+    cfg.fdaf.block_size             = b;
+    cfg.fdaf.partitions             = std::max<size_t>(1, (static_cast<size_t>(m_filter_length) + b - 1) / b);
+    cfg.fdaf.transient_floor_ratio  = m_gate ? 8.0 : 0.0;
+    cfg.analysis_window             = std::max<size_t>(2 * b, 1024);
+    cfg.predictor.analysis_capacity = std::max(cfg.predictor.analysis_capacity, cfg.analysis_window);
+    return cfg;
+}
+
 /// Build a canceller from the current config and publish it for the audio
 /// thread to adopt. Caller holds m_control_mutex.
 void publish() {
     delete m_trash.exchange(nullptr, std::memory_order_acq_rel); // reap
     try {
-        auto eng = m_warp ? std::make_unique<engine>(std::in_place_type<warped_afc>, make_config<warped_afc>())
-                          : std::make_unique<engine>(std::in_place_type<speech_afc>, make_config<speech_afc>());
+        std::unique_ptr<engine> eng;
+        if (m_kalman) {
+            eng = m_warp ? std::make_unique<engine>(std::in_place_type<kalman_warped_afc>,
+                                                    make_kalman_config<kalman_warped_afc>())
+                         : std::make_unique<engine>(std::in_place_type<kalman_speech_afc>,
+                                                    make_kalman_config<kalman_speech_afc>());
+        }
+        else {
+            eng = m_warp ? std::make_unique<engine>(std::in_place_type<warped_afc>, make_config<warped_afc>())
+                         : std::make_unique<engine>(std::in_place_type<speech_afc>, make_config<speech_afc>());
+        }
         // A still-unadopted previous pending engine comes back to us here
         // and is deleted — the audio thread only ever sees the newest one.
         delete m_pending.exchange(eng.release(), std::memory_order_acq_rel);
