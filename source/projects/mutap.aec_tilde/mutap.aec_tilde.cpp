@@ -34,10 +34,9 @@
 /// near-end noise floor, and the initial receive guard. This is the
 /// configuration MuTap's ITU-T compliance battery certifies at 48 and
 /// 16 kHz (docs/itu-compliance.md in MuTap; every requirement met at both
-/// rates), with the chain's per-block time constants rescaled here for the
-/// actual @block and host sample rate exactly the way the battery's pinned
-/// preset rescales them (tests/support/itu_chain.h is the source of that
-/// rule). With @postfilter on, @mu, @warp and @kalman are ignored (the
+/// rates), built from the library's own preset (mutap::aec_chain_preset),
+/// which rescales every per-block time constant for the actual @block and
+/// host sample rate. With @postfilter on, @mu, @warp and @kalman are ignored (the
 /// chain's canceller is already the Kalman core) and @gate selects the
 /// initial receive guard instead of the NLMS gating stack; the right
 /// outlet reports the suppressor's echo-explained fraction instead of IPC.
@@ -474,43 +473,16 @@ typename Aec::config make_kalman_config() const {
     return cfg;
 }
 
-/// The compliance chain, scaled for (block, sample rate) exactly the way
-/// the ITU battery's pinned preset scales it — MuTap
-/// tests/support/itu_chain.h chain_config() is the source of this rule;
-/// keep the two in lockstep (the preset belongs in the library proper,
-/// filed in MuTap's HANDOFF as Stage 5 core follow-up). Every per-block
-/// constant is rescaled so the PHYSICAL time constants the Stage 2/3
-/// measurements calibrated hold at any block duration:
-/// a' = a^(block_s / ref_block_s), windows in blocks divide by the ratio,
-/// and the reference geometry is block 256 at 48 kHz.
+/// The compliance chain IS the library preset (mutap::aec_chain_preset —
+/// the configuration MuTap's ITU battery certifies, with every per-block
+/// time constant rescaled for the actual block and sample rate; its
+/// header documents the rule and the two deliberate exceptions). Only the
+/// external's own toggles are applied on top.
 typename chain_aec::config make_chain_config(double sr) const {
-    typename chain_aec::config cfg;
-    const auto                 b      = static_cast<size_t>(m_block_size);
-    cfg.canceller.block_size          = b;
-    cfg.canceller.partitions          = std::max<size_t>(1, (static_cast<size_t>(m_filter_length) + b - 1) / b);
-    cfg.canceller.transition          = 0.9998; // the measured AEC sweet spot (NOT rescaled; see the preset)
-    cfg.canceller.initial_uncertainty = 10;
-    const double ratio                = (static_cast<double>(b) / sr) / (256.0 / 48000.0);
-    cfg.canceller.noise_smoothing     = std::pow(0.9, ratio);
-    auto& pf                          = cfg.postfilter;
-    pf.leakage_smoothing              = std::pow(pf.leakage_smoothing, ratio);
-    pf.gain_attack                    = std::pow(pf.gain_attack, ratio);
-    pf.gain_release                   = std::pow(pf.gain_release, ratio);
-    pf.floor_smoothing                = std::pow(pf.floor_smoothing, ratio);
-    pf.floor_window = std::max<size_t>(8, static_cast<size_t>(static_cast<double>(pf.floor_window) / ratio));
-    // Low-band suppression cap from 300 Hz (protect voice fundamentals no
-    // analysis resolution can separate from echo; the canceller owns
-    // low-frequency echo).
-    const auto n_analysis      = static_cast<double>(pf.analysis_blocks * b);
-    pf.low_band_bins           = static_cast<size_t>(300.0 * n_analysis / sr) + 1;
-    pf.low_band_certify_blocks = std::max<size_t>(8, static_cast<size_t>(56.0 / ratio));
-    // Comfort-noise floor bias: interpolated on the block-duration ratio
-    // between the two measured calibration points (48 kHz/ratio 1: 4.0;
-    // 16 kHz/ratio 3: 5.6 — longer blocks put fewer meter samples in each
-    // minimum-statistics window and the minima bias deeper), clamped to
-    // the measured span.
-    pf.floor_bias    = std::clamp(4.0 + 0.8 * (ratio - 1.0), 3.0, 5.6);
-    pf.comfort_noise = m_comfort;
+    const auto b = static_cast<size_t>(m_block_size);
+    auto       cfg =
+        mutap::aec_chain_preset<double>(b, std::max<size_t>(1, (static_cast<size_t>(m_filter_length) + b - 1) / b), sr);
+    cfg.postfilter.comfort_noise = m_comfort;
     // @gate selects the initial receive guard (switched < 14 dB send loss
     // until convergence certifies, latched off permanently — the
     // convergence-in-noise clause is unmeetable without it).
