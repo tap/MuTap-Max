@@ -1,9 +1,10 @@
 name: CI
 
 # Builds the MuTap-Max externals via the Min-DevKit CMake on macOS (universal
-# x86_64 + arm64 .mxo) and Windows (.mxe64), checking the 1 external comes out.
-# Both this repo and the MuTap submodule are public, so the default
-# GITHUB_TOKEN suffices for the recursive checkout.
+# x86_64 + arm64 .mxo) and Windows (.mxe64), checking that every project under
+# source/projects/ produced its external. Both this repo and the MuTap
+# submodule are public, so the default GITHUB_TOKEN suffices for the
+# recursive checkout.
 
 on:
   push:
@@ -25,13 +26,14 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Verify 1 universal external
+      - name: Verify one universal external per project
         run: |
           set -euo pipefail
+          expected=$(ls -d source/projects/*/ | wc -l | tr -d ' ')
           count=$(ls -d externals/*.mxo | wc -l | tr -d ' ')
-          echo "built $count externals"
-          if [ "$count" -ne 1 ]; then
-            echo "::error::expected 1 external, got $count"; exit 1
+          echo "built $count externals (projects: $expected)"
+          if [ "$count" -ne "$expected" ]; then
+            echo "::error::expected $expected externals, got $count"; exit 1
           fi
           fail=0
           for mxo in externals/*.mxo; do
@@ -60,11 +62,12 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Verify 1 external (.mxe64)
+      - name: Verify one external (.mxe64) per project
         shell: pwsh
         run: |
+          $expected = (Get-ChildItem source/projects -Directory).Count
           $ext = Get-ChildItem -Recurse externals -Filter *.mxe64
-          Write-Host "built $($ext.Count) externals"
+          Write-Host "built $($ext.Count) externals (projects: $expected)"
           $ext | ForEach-Object { Write-Host "  $($_.Name)" }
-          if ($ext.Count -ne 1) { throw "expected 1 .mxe64 external, got $($ext.Count)" }
+          if ($ext.Count -ne $expected) { throw "expected $expected .mxe64 externals, got $($ext.Count)" }
           Write-Host "all externals built"
