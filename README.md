@@ -55,8 +55,16 @@ Early scaffold. Two objects so far:
   in the MuTap test suite (`tests/test_aec.cpp`: at 0 dB double-talk the
   naive update is kicked past useless while the Kalman core holds a deep
   estimate with ~13 dB echo suppression through the segment, config-free).
-  The help patcher demonstrates fully in-patch — a delay+lowpass chain
-  stands in for the room, so no acoustic loop is needed.
+  `@postfilter 1` engages the full measured **AEC chain** — the raw Kalman
+  canceller plus MuTap's coherence-driven residual suppressor, comfort
+  noise matched to the room's noise floor, and the initial receive guard:
+  the configuration MuTap's ITU-T compliance battery certifies at 48 and
+  16 kHz (`docs/itu-compliance.md` in MuTap), its time constants rescaled
+  for the actual block size and sample rate (`@comfort 0` disables the
+  fill; one extra block of latency; `@mu`/`@warp`/`@kalman` are ignored
+  and `@gate` selects the receive guard). The help patcher demonstrates
+  fully in-patch — a delay+lowpass chain stands in for the room, so no
+  acoustic loop is needed.
 
 ### How feedback cancellation works (one paragraph)
 

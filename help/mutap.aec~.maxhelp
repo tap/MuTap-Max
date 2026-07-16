@@ -58,7 +58,7 @@
       720.0,
       40.0
      ],
-     "text": "Acoustic echo canceller. Left inlet: the microphone (echo + you). Right inlet: the far-end reference — the SAME signal the patch sends to the speaker. Left outlet: the mic with the echo removed, delayed by @block samples. Right outlet: the IPC double-talk indicator (0..1)."
+     "text": "Acoustic echo canceller. Left inlet: the microphone (echo + you). Right inlet: the far-end reference \u2014 the SAME signal the patch sends to the speaker. Left outlet: the mic with the echo removed, delayed by @block samples. Right outlet: the IPC double-talk indicator (0..1)."
     }
    },
    {
@@ -181,7 +181,7 @@
       520.0,
       54.0
      ],
-     "text": "The simulated room: 42 ms delay + lowpass + attenuation stands in for the speaker-to-mic echo path, so this patcher demonstrates without an acoustic loop. In a real rig, delete this chain — the echo arrives through the air, and the mic signal goes straight to the left inlet. The reference MUST be tapped where the signal actually reaches the speaker (post-fader)."
+     "text": "The simulated room: 42 ms delay + lowpass + attenuation stands in for the speaker-to-mic echo path, so this patcher demonstrates without an acoustic loop. In a real rig, delete this chain \u2014 the echo arrives through the air, and the mic signal goes straight to the left inlet. The reference MUST be tapped where the signal actually reaches the speaker (post-fader)."
     }
    },
    {
@@ -559,7 +559,7 @@
       20.0
      ],
      "outlettype": [],
-     "text": "v2 Kalman engine — the measured double-talk winner (default off; rebuilds)"
+     "text": "v2 Kalman engine \u2014 the measured double-talk winner (default off; rebuilds)"
     }
    },
    {
@@ -640,7 +640,109 @@
       760.0,
       68.0
      ],
-     "text": "Try it: start the audio, raise the far-end fader — the noise 'echo' appears in the mic and the canceller learns it away within a second or two. Now TALK: that is double-talk, the hard part of echo cancellation. A naive filter would chase your voice and wreck its echo estimate; this one keeps adapting through it — the PEM near-end model whitens your voice out of the update, and @kalman 1 tracks it per frequency bin (the measured best, no detector, no tuning; see MuTap tests/test_aec.cpp). Creation arg = echo-path length in samples (default 2048); partitions = filter length / block."
+     "text": "Try it: start the audio, raise the far-end fader \u2014 the noise 'echo' appears in the mic and the canceller learns it away within a second or two. Now TALK: that is double-talk, the hard part of echo cancellation. A naive filter would chase your voice and wreck its echo estimate; this one keeps adapting through it \u2014 the PEM near-end model whitens your voice out of the update, and @kalman 1 tracks it per frequency bin (the measured best, no detector, no tuning; see MuTap tests/test_aec.cpp). For the last 20-30 dB, @postfilter 1 engages the full ITU-certified chain: the residual the linear filter cannot reach is suppressed by coherence and replaced with comfort noise matched to the room, so the far end hears neither echo nor a breathing noise floor. Creation arg = echo-path length in samples (default 2048); partitions = filter length / block."
+    }
+   },
+   {
+    "box": {
+     "id": "obj-37",
+     "maxclass": "toggle",
+     "numinlets": 1,
+     "numoutlets": 1,
+     "patching_rect": [
+      520.0,
+      402.0,
+      24.0,
+      24.0
+     ],
+     "outlettype": [
+      "int"
+     ],
+     "parameter_enable": 0
+    }
+   },
+   {
+    "box": {
+     "id": "obj-38",
+     "maxclass": "message",
+     "numinlets": 2,
+     "numoutlets": 1,
+     "patching_rect": [
+      550.0,
+      426.0,
+      96.0,
+      22.0
+     ],
+     "outlettype": [
+      ""
+     ],
+     "text": "postfilter $1"
+    }
+   },
+   {
+    "box": {
+     "id": "obj-39",
+     "maxclass": "comment",
+     "numinlets": 1,
+     "numoutlets": 0,
+     "patching_rect": [
+      656.0,
+      426.0,
+      360.0,
+      20.0
+     ],
+     "text": "the measured ITU-certified chain (default off; rebuilds; +1 block latency)"
+    }
+   },
+   {
+    "box": {
+     "id": "obj-40",
+     "maxclass": "toggle",
+     "numinlets": 1,
+     "numoutlets": 1,
+     "patching_rect": [
+      520.0,
+      500.0,
+      24.0,
+      24.0
+     ],
+     "outlettype": [
+      "int"
+     ],
+     "parameter_enable": 0
+    }
+   },
+   {
+    "box": {
+     "id": "obj-41",
+     "maxclass": "message",
+     "numinlets": 2,
+     "numoutlets": 1,
+     "patching_rect": [
+      550.0,
+      524.0,
+      80.0,
+      22.0
+     ],
+     "outlettype": [
+      ""
+     ],
+     "text": "comfort $1"
+    }
+   },
+   {
+    "box": {
+     "id": "obj-42",
+     "maxclass": "comment",
+     "numinlets": 1,
+     "numoutlets": 0,
+     "patching_rect": [
+      640.0,
+      524.0,
+      376.0,
+      20.0
+     ],
+     "text": "comfort-noise fill at the room's noise floor (postfilter only; default on)"
     }
    }
   ],
@@ -941,6 +1043,54 @@
      ],
      "source": [
       "obj-34",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-38",
+      0
+     ],
+     "source": [
+      "obj-37",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-12",
+      0
+     ],
+     "source": [
+      "obj-38",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-41",
+      0
+     ],
+     "source": [
+      "obj-40",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-12",
+      0
+     ],
+     "source": [
+      "obj-41",
       0
      ]
     }

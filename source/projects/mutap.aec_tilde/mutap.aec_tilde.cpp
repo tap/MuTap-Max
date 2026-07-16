@@ -26,13 +26,30 @@
 /// indicator (0..1, low = near-end speech dominates, high = unmodeled echo
 /// dominates) every few processed blocks.
 ///
+/// @postfilter swaps the whole engine for the measured AEC CHAIN
+/// (mutap::aec_chain): the RAW frequency-domain Kalman canceller — not PEM;
+/// open-loop AEC has an exogenous far end, so the predictor refit buys
+/// nothing and measurably floors the misalignment — plus the
+/// coherence-driven residual suppressor, comfort noise matched to the
+/// near-end noise floor, and the initial receive guard. This is the
+/// configuration MuTap's ITU-T compliance battery certifies at 48 and
+/// 16 kHz (docs/itu-compliance.md in MuTap; every requirement met at both
+/// rates), with the chain's per-block time constants rescaled here for the
+/// actual @block and host sample rate exactly the way the battery's pinned
+/// preset rescales them (tests/support/itu_chain.h is the source of that
+/// rule). With @postfilter on, @mu, @warp and @kalman are ignored (the
+/// chain's canceller is already the Kalman core) and @gate selects the
+/// initial receive guard instead of the NLMS gating stack; the right
+/// outlet reports the suppressor's echo-explained fraction instead of IPC.
+///
 /// The canceller works on fixed blocks of @block samples, independent of the
 /// host signal vector size: the perform routine gathers samples into
 /// constructor-allocated block buffers, calls process_block() every time a
 /// block fills, and plays the processed block back out — adding exactly
-/// @block samples of latency on the cleaned output. The perform path is
-/// allocation-free (mutap's real-time contract: everything after
-/// construction is noexcept and allocation-free).
+/// @block samples of latency on the cleaned output (@postfilter adds one
+/// further block: the suppressor's constrained causal gain filter). The
+/// perform path is allocation-free (mutap's real-time contract: everything
+/// after construction is noexcept and allocation-free).
 ///
 /// Threading follows the ambitap.xtc~ pattern: attribute setters run on the
 /// control thread, where structural changes (@block, @gate, the filter-length
@@ -55,6 +72,7 @@
 #include "c74_min.h"
 #include "mutap/fd_kalman.h"
 #include "mutap/pem_afc.h"
+#include "mutap/postfilter.h"
 
 using namespace c74::min;
 
@@ -64,6 +82,7 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
     using kalman_speech_aec = mutap::pem_afc<double, mutap::speech_predictor<double>, mutap::partitioned_fdkf<double>>;
     using kalman_warped_aec =
         mutap::pem_afc<double, mutap::warped_lpc_predictor<double>, mutap::partitioned_fdkf<double>>;
+    using chain_aec = mutap::aec_chain<double>; ///< raw Kalman canceller + suppressor + comfort noise
 
     /// One canceller plus its vector-size bridging buffers, all sized for one
     /// block. Built on the control thread; used (and only used) on the audio
@@ -71,18 +90,18 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
     /// near-end model (@warp); the audio thread dispatches with std::visit,
     /// which never allocates.
     struct engine {
-        std::variant<speech_aec, warped_aec, kalman_speech_aec, kalman_warped_aec> aec;
+        std::variant<speech_aec, warped_aec, kalman_speech_aec, kalman_warped_aec, chain_aec> aec;
         std::vector<double> x_block; ///< gathering far-end (reference) samples
         std::vector<double> y_block; ///< gathering microphone samples
         std::vector<double> e_block; ///< last processed block, being played out
         size_t              fill{0}; ///< samples gathered so far, == play-out position
 
         template <typename Aec>
-        explicit engine(std::in_place_type_t<Aec> which, const typename Aec::config& cfg)
+        explicit engine(std::in_place_type_t<Aec> which, const typename Aec::config& cfg, size_t block)
             : aec(which, cfg)
-            , x_block(cfg.fdaf.block_size, 0.0)
-            , y_block(cfg.fdaf.block_size, 0.0)
-            , e_block(cfg.fdaf.block_size, 0.0) {}
+            , x_block(block, 0.0)
+            , y_block(block, 0.0)
+            , e_block(block, 0.0) {}
     };
 
     static constexpr long k_min_block         = 16;
@@ -104,6 +123,9 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
     bool       m_gate{true};          ///< IPC/transient robustness layer on rebuilds
     bool       m_warp{false};         ///< frequency-warped (music) near-end model on rebuilds
     bool       m_kalman{false};       ///< frequency-domain Kalman core (v2) on rebuilds
+    bool       m_postfilter{false};   ///< the measured AEC chain (suppressor + comfort noise) on rebuilds
+    bool       m_comfort{true};       ///< comfort-noise fill inside the chain on rebuilds
+    double     m_chain_sr{0.0};       ///< sample rate the active chain was scaled for (0 = none built)
     bool       m_constructed{false};  ///< guards publish() until the constructor body ran
 
     // Scalar controls applied by the audio thread every vector (no rebuild).
@@ -135,7 +157,10 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
                     "output is delayed by @block samples. The right outlet reports the IPC "
                     "double-talk indicator (0..1). @warp selects the frequency-warped near-end model "
                     "for music/tonal sources; @kalman selects the frequency-domain Kalman engine "
-                    "(v2), the measured double-talk winner."};
+                    "(v2), the measured double-talk winner. @postfilter engages the full measured "
+                    "AEC chain — raw Kalman canceller, coherence-driven residual suppressor, comfort "
+                    "noise, initial receive guard — the configuration MuTap's ITU-T compliance "
+                    "battery certifies."};
     MIN_TAGS{"audio, adaptive, echo, cleaning"};
     MIN_AUTHOR{"MuTap contributors"};
     MIN_RELATED{"mutap.afc~, adc~, dac~, adoutput~"};
@@ -215,7 +240,9 @@ attribute<bool>             gate{this, "gate", true,
                                              "PEM prewhitening already removes most of the need, and the Kalman engine "
                                              "all of it. Changing it rebuilds the canceller from scratch (the learned "
                                              "filter resets). With @warp on, the IPC step scaling stays on even when "
-                                             "@gate is off — the warped model requires it."},
+                                             "@gate is off — the warped model requires it. With @postfilter on, @gate "
+                                             "selects the chain's initial receive guard instead (switched send loss "
+                                             "until convergence certifies, then latched off permanently)."},
                      setter{MIN_FUNCTION{const bool value = args[0];
 std::lock_guard<std::mutex> lock(m_control_mutex);
 m_gate = value;
@@ -269,10 +296,68 @@ return {value};
 }
 ;
 
+attribute<bool>             postfilter{this, "postfilter", false,
+                           description{"Residual-echo post-filter: off = the bare adaptive canceller selected by the "
+                                                   "attributes above, on = the measured AEC CHAIN — the raw frequency-domain "
+                                                   "Kalman canceller plus the coherence-driven residual suppressor, comfort "
+                                                   "noise matched to the near-end noise floor, and the initial receive guard. "
+                                                   "This is the configuration MuTap's ITU-T compliance battery certifies at 48 "
+                                                   "and 16 kHz (single-talk residual below -76 dBm0(A), double-talk near-end "
+                                                   "cost about 1 dB, full-duplex P.340 Category 1), with its time constants "
+                                                   "rescaled for the actual block size and sample rate. With postfilter on, "
+                                                   "@mu, @warp and @kalman are ignored (the chain's canceller is already the "
+                                                   "Kalman core; PEM buys nothing open-loop) and @gate selects the initial "
+                                                   "receive guard; the right outlet reports the suppressor's echo-explained "
+                                                   "fraction (0..1) instead of IPC. Adds one extra block of latency (the "
+                                                   "suppressor's constrained gain filter). Changing it rebuilds the canceller "
+                                                   "from scratch (the learned filter resets)."},
+                           setter{MIN_FUNCTION{const bool value = args[0];
+std::lock_guard<std::mutex> lock(m_control_mutex);
+m_postfilter = value;
+if (m_constructed) {
+    publish();
+}
+return {value};
+}
+}
+}
+;
+
+attribute<bool>             comfort{this, "comfort", true,
+                        description{"Comfort noise (postfilter only): fill suppressed bins with noise matched to the "
+                                                "tracked near-end noise floor (two-window minimum statistics), so the far end "
+                                                "does not hear the room breathe as suppression comes and goes. Fill only — "
+                                                "never subtraction. Off leaves suppressed bins silent (G.168's Figure 9 "
+                                                "measurement convention). Changing it rebuilds the canceller from scratch "
+                                                "(the learned filter resets)."},
+                        setter{MIN_FUNCTION{const bool value = args[0];
+std::lock_guard<std::mutex> lock(m_control_mutex);
+m_comfort = value;
+if (m_constructed) {
+    publish();
+}
+return {value};
+}
+}
+}
+;
+
 /// Zero the learned filter and the block buffers (applied on the audio
 /// thread at the next vector, so it does not race the perform routine).
 message<> reset{this, "reset", "Reset the canceller: zero the learned echo-path estimate.",
                 MIN_FUNCTION{m_reset_request.store(true, std::memory_order_relaxed);
+return {};
+}
+}
+;
+
+/// The chain's time constants are scaled for the host sample rate, so a
+/// rate change while @postfilter is on rebuilds the chain (the bare
+/// engines are rate-agnostic and keep running).
+message<> dspsetup{this, "dspsetup", MIN_FUNCTION{std::lock_guard<std::mutex> lock(m_control_mutex);
+if (m_constructed && m_postfilter && static_cast<double>(args[0]) != m_chain_sr) {
+    publish();
+}
 return {};
 }
 }
@@ -339,7 +424,12 @@ void operator()(audio_bundle input, audio_bundle output) {
                     eng.fill = 0;
                     if (--m_report_countdown <= 0) {
                         m_report_countdown = k_ipc_report_blocks;
-                        m_ipc_atoms[0]     = aec.ipc();
+                        if constexpr (requires { aec.ipc(); }) {
+                            m_ipc_atoms[0] = aec.ipc();
+                        }
+                        else { // the chain: echo-explained fraction (0..1, high = converged on echo)
+                            m_ipc_atoms[0] = aec.postfilter().echo_explained();
+                        }
                         m_ipc_out.send(m_ipc_atoms);
                     }
                 }
@@ -384,21 +474,73 @@ typename Aec::config make_kalman_config() const {
     return cfg;
 }
 
+/// The compliance chain, scaled for (block, sample rate) exactly the way
+/// the ITU battery's pinned preset scales it — MuTap
+/// tests/support/itu_chain.h chain_config() is the source of this rule;
+/// keep the two in lockstep (the preset belongs in the library proper,
+/// filed in MuTap's HANDOFF as Stage 5 core follow-up). Every per-block
+/// constant is rescaled so the PHYSICAL time constants the Stage 2/3
+/// measurements calibrated hold at any block duration:
+/// a' = a^(block_s / ref_block_s), windows in blocks divide by the ratio,
+/// and the reference geometry is block 256 at 48 kHz.
+typename chain_aec::config make_chain_config(double sr) const {
+    typename chain_aec::config cfg;
+    const auto                 b      = static_cast<size_t>(m_block_size);
+    cfg.canceller.block_size          = b;
+    cfg.canceller.partitions          = std::max<size_t>(1, (static_cast<size_t>(m_filter_length) + b - 1) / b);
+    cfg.canceller.transition          = 0.9998; // the measured AEC sweet spot (NOT rescaled; see the preset)
+    cfg.canceller.initial_uncertainty = 10;
+    const double ratio                = (static_cast<double>(b) / sr) / (256.0 / 48000.0);
+    cfg.canceller.noise_smoothing     = std::pow(0.9, ratio);
+    auto& pf                          = cfg.postfilter;
+    pf.leakage_smoothing              = std::pow(pf.leakage_smoothing, ratio);
+    pf.gain_attack                    = std::pow(pf.gain_attack, ratio);
+    pf.gain_release                   = std::pow(pf.gain_release, ratio);
+    pf.floor_smoothing                = std::pow(pf.floor_smoothing, ratio);
+    pf.floor_window = std::max<size_t>(8, static_cast<size_t>(static_cast<double>(pf.floor_window) / ratio));
+    // Low-band suppression cap from 300 Hz (protect voice fundamentals no
+    // analysis resolution can separate from echo; the canceller owns
+    // low-frequency echo).
+    const auto n_analysis      = static_cast<double>(pf.analysis_blocks * b);
+    pf.low_band_bins           = static_cast<size_t>(300.0 * n_analysis / sr) + 1;
+    pf.low_band_certify_blocks = std::max<size_t>(8, static_cast<size_t>(56.0 / ratio));
+    // Comfort-noise floor bias: interpolated on the block-duration ratio
+    // between the two measured calibration points (48 kHz/ratio 1: 4.0;
+    // 16 kHz/ratio 3: 5.6 — longer blocks put fewer meter samples in each
+    // minimum-statistics window and the minima bias deeper), clamped to
+    // the measured span.
+    pf.floor_bias    = std::clamp(4.0 + 0.8 * (ratio - 1.0), 3.0, 5.6);
+    pf.comfort_noise = m_comfort;
+    // @gate selects the initial receive guard (switched < 14 dB send loss
+    // until convergence certifies, latched off permanently — the
+    // convergence-in-noise clause is unmeetable without it).
+    if (!m_gate) {
+        cfg.guard_attenuation_db = 0.0;
+    }
+    return cfg;
+}
+
 /// Build a canceller from the current config and publish it for the audio
 /// thread to adopt. Caller holds m_control_mutex.
 void publish() {
     delete m_trash.exchange(nullptr, std::memory_order_acq_rel); // reap
     try {
+        const auto              b = static_cast<size_t>(m_block_size);
         std::unique_ptr<engine> eng;
-        if (m_kalman) {
+        if (m_postfilter) {
+            const double sr = samplerate() > 0.0 ? samplerate() : 48000.0;
+            eng             = std::make_unique<engine>(std::in_place_type<chain_aec>, make_chain_config(sr), b);
+            m_chain_sr      = sr;
+        }
+        else if (m_kalman) {
             eng = m_warp ? std::make_unique<engine>(std::in_place_type<kalman_warped_aec>,
-                                                    make_kalman_config<kalman_warped_aec>())
+                                                    make_kalman_config<kalman_warped_aec>(), b)
                          : std::make_unique<engine>(std::in_place_type<kalman_speech_aec>,
-                                                    make_kalman_config<kalman_speech_aec>());
+                                                    make_kalman_config<kalman_speech_aec>(), b);
         }
         else {
-            eng = m_warp ? std::make_unique<engine>(std::in_place_type<warped_aec>, make_config<warped_aec>())
-                         : std::make_unique<engine>(std::in_place_type<speech_aec>, make_config<speech_aec>());
+            eng = m_warp ? std::make_unique<engine>(std::in_place_type<warped_aec>, make_config<warped_aec>(), b)
+                         : std::make_unique<engine>(std::in_place_type<speech_aec>, make_config<speech_aec>(), b);
         }
         // A still-unadopted previous pending engine comes back to us here
         // and is deleted — the audio thread only ever sees the newest one.
