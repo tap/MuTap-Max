@@ -19,10 +19,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install clang-format
-        run: sudo apt-get update && sudo apt-get install -y clang-format-18
-      - name: clang-format check
-        run: clang-format-18 --dry-run --Werror $(git ls-files 'source/projects/*.cpp')
+      # Run the TapHouse pre-commit hook — the same pinned clang-format
+      # developers get from `pre-commit install` (.pre-commit-config.yaml), so
+      # local and CI share one version by construction. Submodules (min-api,
+      # MuTap) are not checked out and pre-commit does not descend into them, so
+      # only the externals' own C/C++ is checked.
+      - name: clang-format (pre-commit)
+        run: |
+          pipx install pre-commit
+          pre-commit run --all-files --show-diff-on-failure
 
   clang-tidy:
     runs-on: ubuntu-latest
