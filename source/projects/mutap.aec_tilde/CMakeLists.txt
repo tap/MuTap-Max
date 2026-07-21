@@ -19,8 +19,8 @@ add_library(
     ${SOURCE_FILES}
 )
 
-# MuTap headers (header-only pem_afc/fdaf/lpc) + MuTap::fft (the vendored
-# Ooura rdft that mutap::basic_real_fft calls); the `mutap` interface target
+# MuTap headers (header-only pem_afc/fdaf/lpc) + tap::dsp (the vendored
+# Ooura rdft that tap::mu::basic_real_fft calls); the `mutap` interface target
 # carries both.
 target_link_libraries(${PROJECT_NAME} PRIVATE mutap)
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_20)

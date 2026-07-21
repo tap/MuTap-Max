@@ -5,7 +5,7 @@
 /// the patch sends to the speaker), so nothing the canceller does feeds back
 /// around — what survives from the feedback problem is DOUBLE-TALK, the
 /// near-end talker speaking over the echo. Wraps the same
-/// mutap::pem_afc<double> engines as mutap.afc~ (the paper the PEM structure
+/// tap::mu::pem_afc<double> engines as mutap.afc~ (the paper the PEM structure
 /// implements — Gil-Cacho et al. 2014 — is an open-loop double-talk-robust
 /// AEC framework before MuTap borrowed it for feedback): the near-end model
 /// is re-fit every block and whitened out of the adaptive update, which is
@@ -27,14 +27,14 @@
 /// dominates) every few processed blocks.
 ///
 /// @postfilter swaps the whole engine for the measured AEC CHAIN
-/// (mutap::aec_chain): the RAW frequency-domain Kalman canceller — not PEM;
+/// (tap::mu::aec_chain): the RAW frequency-domain Kalman canceller — not PEM;
 /// open-loop AEC has an exogenous far end, so the predictor refit buys
 /// nothing and measurably floors the misalignment — plus the
 /// coherence-driven residual suppressor, comfort noise matched to the
 /// near-end noise floor, and the initial receive guard. This is the
 /// configuration MuTap's ITU-T compliance battery certifies at 48 and
 /// 16 kHz (docs/itu-compliance.md in MuTap; every requirement met at both
-/// rates), built from the library's own preset (mutap::aec_chain_preset),
+/// rates), built from the library's own preset (tap::mu::aec_chain_preset),
 /// which rescales every per-block time constant for the actual @block and
 /// host sample rate. With @postfilter on, @mu, @warp and @kalman are ignored (the
 /// chain's canceller is already the Kalman core) and @gate selects the
@@ -76,12 +76,12 @@
 using namespace c74::min;
 
 class mutap_aec : public object<mutap_aec>, public vector_operator<> {
-    using speech_aec        = mutap::pem_afc<double>;
-    using warped_aec        = mutap::pem_afc<double, mutap::warped_lpc_predictor<double>>;
-    using kalman_speech_aec = mutap::pem_afc<double, mutap::speech_predictor<double>, mutap::partitioned_fdkf<double>>;
+    using speech_aec        = tap::mu::pem_afc<double>;
+    using warped_aec        = tap::mu::pem_afc<double, tap::mu::warped_lpc_predictor<double>>;
+    using kalman_speech_aec = tap::mu::pem_afc<double, tap::mu::speech_predictor<double>, tap::mu::partitioned_fdkf<double>>;
     using kalman_warped_aec =
-        mutap::pem_afc<double, mutap::warped_lpc_predictor<double>, mutap::partitioned_fdkf<double>>;
-    using chain_aec = mutap::aec_chain<double>; ///< raw Kalman canceller + suppressor + comfort noise
+        tap::mu::pem_afc<double, tap::mu::warped_lpc_predictor<double>, tap::mu::partitioned_fdkf<double>>;
+    using chain_aec = tap::mu::aec_chain<double>; ///< raw Kalman canceller + suppressor + comfort noise
 
     /// One canceller plus its vector-size bridging buffers, all sized for one
     /// block. Built on the control thread; used (and only used) on the audio
@@ -458,14 +458,14 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
         return cfg;
     }
 
-    /// The compliance chain IS the library preset (mutap::aec_chain_preset —
+    /// The compliance chain IS the library preset (tap::mu::aec_chain_preset —
     /// the configuration MuTap's ITU battery certifies, with every per-block
     /// time constant rescaled for the actual block and sample rate; its
     /// header documents the rule and the two deliberate exceptions). Only the
     /// external's own toggles are applied on top.
     typename chain_aec::config make_chain_config(double sr) const {
         const auto b   = static_cast<size_t>(m_block_size);
-        auto       cfg = mutap::aec_chain_preset<double>(
+        auto       cfg = tap::mu::aec_chain_preset<double>(
             b, std::max<size_t>(1, (static_cast<size_t>(m_filter_length) + b - 1) / b), sr);
         cfg.postfilter.comfort_noise = m_comfort;
         // @gate selects the initial receive guard (switched < 14 dB send loss

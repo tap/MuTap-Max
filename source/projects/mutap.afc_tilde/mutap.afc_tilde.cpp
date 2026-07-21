@@ -1,17 +1,17 @@
 /// @file
 /// mutap.afc~ — acoustic feedback (howling) canceller: subtract an adaptive
 /// estimate of the loudspeaker→microphone feedback path from the microphone
-/// signal. Wraps mutap::pem_afc<double> (FDAF-PEM-AFROW: a partitioned-block
+/// signal. Wraps tap::mu::pem_afc<double> (FDAF-PEM-AFROW: a partitioned-block
 /// frequency-domain adaptive filter whose update is decorrelated from the
 /// near-end source by prediction-error-method prewhitening — the closed loop
 /// biases any naive adaptive estimate, and the PEM prewhitening removes that
 /// bias; Gil-Cacho et al. 2014, Rombouts et al. 2007). @warp swaps the
 /// speech-cascade near-end model for the frequency-warped one built for
-/// music/tonal material (mutap::warped_lpc_predictor), and keeps IPC step
+/// music/tonal material (tap::mu::warped_lpc_predictor), and keeps IPC step
 /// scaling on while it is active — the warped whitener requires it for
 /// room-robust closed-loop stability (see include/mutap/lpc.h in MuTap).
 /// @kalman swaps the NLMS core for the frequency-domain Kalman filter
-/// (mutap::partitioned_fdkf, the v2 engine): @mu is ignored, @gate selects
+/// (tap::mu::partitioned_fdkf, the v2 engine): @mu is ignored, @gate selects
 /// the burst floor, and the warped model needs no IPC pairing there.
 ///
 /// Signal inlet 0 is the microphone signal y; signal inlet 1 is the
@@ -54,11 +54,11 @@
 using namespace c74::min;
 
 class mutap_afc : public object<mutap_afc>, public vector_operator<> {
-    using speech_afc        = mutap::pem_afc<double>;
-    using warped_afc        = mutap::pem_afc<double, mutap::warped_lpc_predictor<double>>;
-    using kalman_speech_afc = mutap::pem_afc<double, mutap::speech_predictor<double>, mutap::partitioned_fdkf<double>>;
+    using speech_afc        = tap::mu::pem_afc<double>;
+    using warped_afc        = tap::mu::pem_afc<double, tap::mu::warped_lpc_predictor<double>>;
+    using kalman_speech_afc = tap::mu::pem_afc<double, tap::mu::speech_predictor<double>, tap::mu::partitioned_fdkf<double>>;
     using kalman_warped_afc =
-        mutap::pem_afc<double, mutap::warped_lpc_predictor<double>, mutap::partitioned_fdkf<double>>;
+        tap::mu::pem_afc<double, tap::mu::warped_lpc_predictor<double>, tap::mu::partitioned_fdkf<double>>;
 
     /// One canceller plus its vector-size bridging buffers, all sized for one
     /// block. Built on the control thread; used (and only used) on the audio
