@@ -27,9 +27,6 @@ target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_20)
 
 include(${C74_MIN_API_DIR}/script/min-posttarget.cmake)
 
-# min-posttarget pins CXX_STANDARD to 17; MuTap requires C++20.
-set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 20)
-
 # Unit test (min-api's Catch2 harness), if the test file exists.
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${PROJECT_NAME}_test.cpp")
     include(${C74_MIN_API_DIR}/test/min-object-unittest.cmake)
