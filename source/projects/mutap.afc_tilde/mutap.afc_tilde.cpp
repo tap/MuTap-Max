@@ -54,9 +54,10 @@
 using namespace c74::min;
 
 class mutap_afc : public object<mutap_afc>, public vector_operator<> {
-    using speech_afc        = tap::mu::pem_afc<double>;
-    using warped_afc        = tap::mu::pem_afc<double, tap::mu::warped_lpc_predictor<double>>;
-    using kalman_speech_afc = tap::mu::pem_afc<double, tap::mu::speech_predictor<double>, tap::mu::partitioned_fdkf<double>>;
+    using speech_afc = tap::mu::pem_afc<double>;
+    using warped_afc = tap::mu::pem_afc<double, tap::mu::warped_lpc_predictor<double>>;
+    using kalman_speech_afc =
+        tap::mu::pem_afc<double, tap::mu::speech_predictor<double>, tap::mu::partitioned_fdkf<double>>;
     using kalman_warped_afc =
         tap::mu::pem_afc<double, tap::mu::warped_lpc_predictor<double>, tap::mu::partitioned_fdkf<double>>;
 

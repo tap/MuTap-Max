@@ -76,9 +76,10 @@
 using namespace c74::min;
 
 class mutap_aec : public object<mutap_aec>, public vector_operator<> {
-    using speech_aec        = tap::mu::pem_afc<double>;
-    using warped_aec        = tap::mu::pem_afc<double, tap::mu::warped_lpc_predictor<double>>;
-    using kalman_speech_aec = tap::mu::pem_afc<double, tap::mu::speech_predictor<double>, tap::mu::partitioned_fdkf<double>>;
+    using speech_aec = tap::mu::pem_afc<double>;
+    using warped_aec = tap::mu::pem_afc<double, tap::mu::warped_lpc_predictor<double>>;
+    using kalman_speech_aec =
+        tap::mu::pem_afc<double, tap::mu::speech_predictor<double>, tap::mu::partitioned_fdkf<double>>;
     using kalman_warped_aec =
         tap::mu::pem_afc<double, tap::mu::warped_lpc_predictor<double>, tap::mu::partitioned_fdkf<double>>;
     using chain_aec = tap::mu::aec_chain<double>; ///< raw Kalman canceller + suppressor + comfort noise
