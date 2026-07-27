@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 MuTap contributors
 
-#include "c74_min_unittest.h"    // required unit-test header (defines main via Catch)
-#include "mutap.aec_tilde.cpp"   // include the object source so we can instantiate it
+#include "c74_min_unittest.h"  // required unit-test header (defines main via Catch)
+#include "mutap.aec_tilde.cpp" // include the object source so we can instantiate it
 
 SCENARIO("mutap.aec~ instantiates with the documented defaults") {
     ext_main(nullptr); // configure the class (required once per test executable)
