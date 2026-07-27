@@ -30,4 +30,8 @@ include(${C74_MIN_API_DIR}/script/min-posttarget.cmake)
 # Unit test (min-api's Catch2 harness), if the test file exists.
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${PROJECT_NAME}_test.cpp")
     include(${C74_MIN_API_DIR}/test/min-object-unittest.cmake)
+    # The harness builds a SEPARATE ${PROJECT_NAME}_test executable, which does not
+    # inherit the target-scoped libraries given to the external above. It needs the
+    # same `mutap` interface target for the kernel headers and tap::dsp.
+    target_link_libraries(${PROJECT_NAME}_test PRIVATE mutap)
 endif ()
