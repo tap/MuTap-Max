@@ -1,12 +1,20 @@
 {
 	"name": "MuTap",
-	"version": "0.0.1",
+	"version": "@GIT_VERSION_MAJ@.@GIT_VERSION_MIN@.@GIT_VERSION_SUB@",
 	"author": "MuTap contributors",
 	"description": "Adaptive audio-cleaning externals for Max/MSP (feedback/howling suppression, echo cancellation), built on the MuTap library.",
 	"tags": ["adaptive", "feedback", "howling", "echo", "audio", "cleaning"],
-	"max_version_min": "8.0.0",
+	"max_version_min": "9.0",
 	"max_version_max": "none",
 	"os": {
-		"macintosh": { "platform": ["x64", "arm64"] }
-	}
+		"macintosh": {
+			"platform": ["x64", "arm64"],
+			"min_version": "11.0"
+		},
+		"windows": {
+			"platform": ["x64"],
+			"min_version": "none"
+		}
+	},
+	"website": "https://github.com/tap/MuTap-Max"
 }
