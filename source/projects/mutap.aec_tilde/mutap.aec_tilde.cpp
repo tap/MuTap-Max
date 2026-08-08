@@ -333,7 +333,8 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
                             setter{MIN_FUNCTION{
                                 const symbol                value = args[0];
                                 std::lock_guard<std::mutex> lock(m_control_mutex);
-                                m_model_path = std::string(value);
+                                m_model_path =
+                                    std::string(value.c_str()); // c_str(): MSVC finds symbol->string ambiguous
                                 if (m_constructed && m_postfilter == 2) {
                                     publish();
                                 }
