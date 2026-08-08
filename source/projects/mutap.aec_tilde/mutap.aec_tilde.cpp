@@ -70,8 +70,10 @@
 
 #include "c74_min.h"
 #include "mutap/fd_kalman.h"
+#include "mutap/nn_chain.h"
 #include "mutap/pem_afc.h"
 #include "mutap/postfilter.h"
+#include "mutap_nn_weights_default.h"
 
 using namespace c74::min;
 
@@ -82,7 +84,8 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
         tap::mu::pem_afc<double, tap::mu::speech_predictor<double>, tap::mu::partitioned_fdkf<double>>;
     using kalman_warped_aec =
         tap::mu::pem_afc<double, tap::mu::warped_lpc_predictor<double>, tap::mu::partitioned_fdkf<double>>;
-    using chain_aec = tap::mu::aec_chain<double>; ///< raw Kalman canceller + suppressor + comfort noise
+    using chain_aec    = tap::mu::aec_chain<double>;    ///< raw Kalman canceller + suppressor + comfort noise
+    using nn_chain_aec = tap::mu::aec_chain_nn<double>; ///< the same chain with the LEARNED post engine
 
     /// One canceller plus its vector-size bridging buffers, all sized for one
     /// block. Built on the control thread; used (and only used) on the audio
@@ -90,7 +93,7 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
     /// near-end model (@warp); the audio thread dispatches with std::visit,
     /// which never allocates.
     struct engine {
-        std::variant<speech_aec, warped_aec, kalman_speech_aec, kalman_warped_aec, chain_aec> aec;
+        std::variant<speech_aec, warped_aec, kalman_speech_aec, kalman_warped_aec, chain_aec, nn_chain_aec> aec;
         std::vector<double> x_block; ///< gathering far-end (reference) samples
         std::vector<double> y_block; ///< gathering microphone samples
         std::vector<double> e_block; ///< last processed block, being played out
@@ -117,16 +120,17 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
     // Control-side state (attribute setters may arrive on both the main and
     // the scheduler thread; the mutex serializes them — the audio thread
     // never takes it).
-    std::mutex m_control_mutex;
-    long       m_filter_length{2048}; ///< requested filter length, samples (creation arg)
-    long       m_block_size{256};     ///< requested canceller block size, samples
-    bool       m_gate{true};          ///< IPC/transient robustness layer on rebuilds
-    bool       m_warp{false};         ///< frequency-warped (music) near-end model on rebuilds
-    bool       m_kalman{false};       ///< frequency-domain Kalman core (v2) on rebuilds
-    bool       m_postfilter{false};   ///< the measured AEC chain (suppressor + comfort noise) on rebuilds
-    bool       m_comfort{true};       ///< comfort-noise fill inside the chain on rebuilds
-    double     m_chain_sr{0.0};       ///< sample rate the active chain was scaled for (0 = none built)
-    bool       m_constructed{false};  ///< guards publish() until the constructor body ran
+    std::mutex  m_control_mutex;
+    long        m_filter_length{2048}; ///< requested filter length, samples (creation arg)
+    long        m_block_size{256};     ///< requested canceller block size, samples
+    bool        m_gate{true};          ///< IPC/transient robustness layer on rebuilds
+    bool        m_warp{false};         ///< frequency-warped (music) near-end model on rebuilds
+    bool        m_kalman{false};       ///< frequency-domain Kalman core (v2) on rebuilds
+    long        m_postfilter{0};       ///< post-filter engine: 0 off, 1 classical chain, 2 learned chain
+    std::string m_model_path{};        ///< learned-engine weights file ("" = built-in model)
+    bool        m_comfort{true};       ///< comfort-noise fill inside the chain on rebuilds
+    double      m_chain_sr{0.0};       ///< sample rate the active chain was scaled for (0 = none built)
+    bool        m_constructed{false};  ///< guards publish() until the constructor body ran
 
     // Scalar controls applied by the audio thread every vector (no rebuild).
     std::atomic<double> m_mu{0.5};
@@ -284,31 +288,57 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
                                return {value};
                            }}};
 
-    attribute<bool> postfilter{
-        this, "postfilter", false,
-        description{"Residual-echo post-filter: off = the bare adaptive canceller selected by the "
-                    "attributes above, on = the measured AEC CHAIN — the raw frequency-domain "
-                    "Kalman canceller plus the coherence-driven residual suppressor, comfort "
-                    "noise matched to the near-end noise floor, and the initial receive guard. "
-                    "This is the configuration MuTap's ITU-T compliance battery certifies at 48 "
-                    "and 16 kHz (single-talk residual below -76 dBm0(A), double-talk near-end "
-                    "cost about 1 dB, full-duplex P.340 Category 1), with its time constants "
-                    "rescaled for the actual block size and sample rate. With postfilter on, "
-                    "@mu, @warp and @kalman are ignored (the chain's canceller is already the "
-                    "Kalman core; PEM buys nothing open-loop) and @gate selects the initial "
-                    "receive guard; the right outlet reports the suppressor's echo-explained "
-                    "fraction (0..1) instead of IPC. Adds one extra block of latency (the "
-                    "suppressor's constrained gain filter). Changing it rebuilds the canceller "
-                    "from scratch (the learned filter resets)."},
-        setter{MIN_FUNCTION{
-            const bool                  value = args[0];
-            std::lock_guard<std::mutex> lock(m_control_mutex);
-            m_postfilter = value;
-            if (m_constructed) {
-                publish();
-            }
-            return {value};
-        }}};
+    attribute<int> postfilter{this, "postfilter", 0,
+                              description{"Residual-echo post-filter engine: 0 = off (the bare adaptive canceller "
+                                          "selected by the attributes above), 1 = the CLASSICAL chain — the raw "
+                                          "frequency-domain Kalman canceller plus the coherence-driven residual "
+                                          "suppressor, comfort noise matched to the near-end noise floor, and the "
+                                          "initial receive guard; the configuration MuTap's ITU-T compliance battery "
+                                          "certifies at 48 and 16 kHz (single-talk residual below -76 dBm0(A), "
+                                          "double-talk near-end cost about 1 dB, full-duplex P.340 Category 1), with "
+                                          "its time constants rescaled for the actual block size and sample rate. "
+                                          "2 = the LEARNED chain: the same canceller and guard with the post-filter "
+                                          "replaced by a small trained network predicting per-band gains (see @model) "
+                                          "— measured stronger single-talk echo removal on speech-like material at "
+                                          "equal near-end transparency, weaker double-talk suppression on material "
+                                          "unlike its training data; the classical engine remains the certified "
+                                          "default. With postfilter nonzero, @mu, @warp and @kalman are ignored (the "
+                                          "chain's canceller is already the Kalman core; PEM buys nothing open-loop) "
+                                          "and @gate selects the initial receive guard; the right outlet reports the "
+                                          "post-filter's echo-explained fraction (0..1) instead of IPC. The learned "
+                                          "engine requires @block to equal its model's trained block size (256 for "
+                                          "the built-in model) and coerces it, with a console notice, if it does "
+                                          "not. Adds one extra block of latency. Old patches with postfilter 0/1 "
+                                          "keep their exact meaning. Changing it rebuilds the canceller from "
+                                          "scratch (the learned filter resets)."},
+                              setter{MIN_FUNCTION{
+                                  const long value = std::clamp<long>(static_cast<long>(args[0]), 0, 2);
+                                  std::lock_guard<std::mutex> lock(m_control_mutex);
+                                  m_postfilter = value;
+                                  if (m_constructed) {
+                                      publish();
+                                  }
+                                  return {static_cast<int>(m_postfilter)};
+                              }}};
+
+    attribute<symbol> model{this, "model", "",
+                            description{"Learned-engine weights (postfilter 2 only): a path to a trained MUNN "
+                                        "model file (MuTap's tools/ml pipeline exports these), or empty for the "
+                                        "package's built-in 48 kHz model. A model carries its own analysis "
+                                        "geometry; @block must equal its trained block size and is coerced, with "
+                                        "a console notice, if it does not. A file that cannot be read or "
+                                        "validated posts an error and leaves the running engine unchanged. "
+                                        "Changing it rebuilds the canceller from scratch (the learned filter "
+                                        "resets)."},
+                            setter{MIN_FUNCTION{
+                                const symbol                value = args[0];
+                                std::lock_guard<std::mutex> lock(m_control_mutex);
+                                m_model_path = std::string(value);
+                                if (m_constructed && m_postfilter == 2) {
+                                    publish();
+                                }
+                                return {value};
+                            }}};
 
     attribute<bool> comfort{
         this, "comfort", true,
@@ -342,7 +372,7 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
     message<> dspsetup{this, "dspsetup",
                        MIN_FUNCTION{
                            std::lock_guard<std::mutex> lock(m_control_mutex);
-                           if (m_constructed && m_postfilter && static_cast<double>(args[0]) != m_chain_sr) {
+                           if (m_constructed && m_postfilter != 0 && static_cast<double>(args[0]) != m_chain_sr) {
                                publish();
                            }
                            return {};
@@ -478,6 +508,22 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
         return cfg;
     }
 
+    /// The learned-engine chain: same canceller/guard calibration as the
+    /// classical preset (tap::mu::aec_chain_nn_preset), post-filter swapped
+    /// for the trained model — @model's file, or the built-in weights. The
+    /// model's trained block size is authoritative: publish() coerces
+    /// @block to it (with a console notice) before construction.
+    typename nn_chain_aec::config make_nn_chain_config(double sr, tap::mu::nn_suppressor_weights weights) const {
+        const auto b   = static_cast<size_t>(m_block_size);
+        auto       cfg = tap::mu::aec_chain_nn_preset<double>(
+            b, std::max<size_t>(1, (static_cast<size_t>(m_filter_length) + b - 1) / b), sr, std::move(weights));
+        cfg.postfilter.comfort_noise = m_comfort;
+        if (!m_gate) {
+            cfg.guard_attenuation_db = 0.0;
+        }
+        return cfg;
+    }
+
     /// Build a canceller from the current config and publish it for the audio
     /// thread to adopt. Caller holds m_control_mutex.
     void publish() {
@@ -485,7 +531,26 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
         try {
             const auto              b = static_cast<size_t>(m_block_size);
             std::unique_ptr<engine> eng;
-            if (m_postfilter) {
+            if (m_postfilter == 2) {
+                const double sr      = samplerate() > 0.0 ? samplerate() : 48000.0;
+                auto         weights = m_model_path.empty() ? tap::mu::parse_nn_suppressor_weights(k_nn_weights_default,
+                                                                                                   sizeof(k_nn_weights_default))
+                                                            : tap::mu::load_nn_suppressor_weights(m_model_path.c_str());
+                if (weights.geometry.hop != b) {
+                    cout << "postfilter 2: block coerced to the model's trained block size ("
+                         << static_cast<int>(weights.geometry.hop) << ")" << endl;
+                    m_block_size = static_cast<long>(weights.geometry.hop);
+                }
+                if (weights.geometry.sample_rate != sr) {
+                    cout << "postfilter 2: model trained at " << weights.geometry.sample_rate << " Hz, running at "
+                         << sr << " Hz (detuned bands; train a matching model for " << "best results)" << endl;
+                }
+                const auto bn = static_cast<size_t>(m_block_size);
+                eng           = std::make_unique<engine>(std::in_place_type<nn_chain_aec>,
+                                                         make_nn_chain_config(sr, std::move(weights)), bn);
+                m_chain_sr    = sr;
+            }
+            else if (m_postfilter == 1) {
                 const double sr = samplerate() > 0.0 ? samplerate() : 48000.0;
                 eng             = std::make_unique<engine>(std::in_place_type<chain_aec>, make_chain_config(sr), b);
                 m_chain_sr      = sr;
@@ -504,9 +569,11 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
             // and is deleted — the audio thread only ever sees the newest one.
             delete m_pending.exchange(eng.release(), std::memory_order_acq_rel);
         }
-        catch (const std::exception&) {
-            // Defensive: leave the current canceller running (the perform path
-            // falls back to the dry microphone signal if none exists yet).
+        catch (const std::exception& ex) {
+            // Leave the current canceller running (the perform path falls back
+            // to the dry microphone signal if none exists yet) and say why —
+            // a bad @model file lands here.
+            cerr << "engine rebuild failed: " << ex.what() << endl;
         }
     }
 };

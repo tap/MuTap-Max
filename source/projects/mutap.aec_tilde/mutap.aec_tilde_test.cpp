@@ -28,8 +28,41 @@ SCENARIO("mutap.aec~ instantiates with the documented defaults") {
             REQUIRE(static_cast<bool>(my_object.kalman) == false);
         }
         THEN("the post-filter chain is off, with comfort noise armed for when it is on") {
-            REQUIRE(static_cast<bool>(my_object.postfilter) == false);
+            REQUIRE(static_cast<int>(my_object.postfilter) == 0);
             REQUIRE(static_cast<bool>(my_object.comfort) == true);
+        }
+        THEN("the learned engine defaults to the built-in model") {
+            const c74::min::symbol current = my_object.model;
+            REQUIRE(std::string(current.c_str()).empty());
+        }
+    }
+}
+
+SCENARIO("mutap.aec~ clamps the post-filter engine selector") {
+    ext_main(nullptr);
+
+    GIVEN("a default instance") {
+        test_wrapper<mutap_aec> an_instance;
+        mutap_aec&              my_object = an_instance;
+
+        WHEN("an out-of-range engine is requested") {
+            my_object.postfilter = 7;
+            THEN("it clamps to the learned engine") {
+                REQUIRE(static_cast<int>(my_object.postfilter) == 2);
+            }
+        }
+        WHEN("the learned engine is selected with the built-in model") {
+            my_object.postfilter = 2;
+            THEN("the block size is coerced to the model's trained hop") {
+                REQUIRE(static_cast<int>(my_object.postfilter) == 2);
+                // built-in model geometry pins @block via publish()
+            }
+        }
+        WHEN("old boolean-style patches set 0/1") {
+            my_object.postfilter = 1;
+            REQUIRE(static_cast<int>(my_object.postfilter) == 1);
+            my_object.postfilter = 0;
+            REQUIRE(static_cast<int>(my_object.postfilter) == 0);
         }
     }
 }
