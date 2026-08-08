@@ -638,9 +638,9 @@
       20.0,
       600.0,
       760.0,
-      68.0
+      95.0
      ],
-     "text": "Try it: start the audio, raise the far-end fader \u2014 the noise 'echo' appears in the mic and the canceller learns it away within a second or two. Now TALK: that is double-talk, the hard part of echo cancellation. A naive filter would chase your voice and wreck its echo estimate; this one keeps adapting through it \u2014 the PEM near-end model whitens your voice out of the update, and @kalman 1 tracks it per frequency bin (the measured best, no detector, no tuning; see MuTap tests/test_aec.cpp). For the last 20-30 dB, @postfilter 1 engages the full ITU-certified chain: the residual the linear filter cannot reach is suppressed by coherence and replaced with comfort noise matched to the room, so the far end hears neither echo nor a breathing noise floor. Creation arg = echo-path length in samples (default 2048); partitions = filter length / block."
+     "text": "Try it: start the audio, raise the far-end fader \u2014 the noise 'echo' appears in the mic and the canceller learns it away within a second or two. Now TALK: that is double-talk, the hard part of echo cancellation. A naive filter would chase your voice and wreck its echo estimate; this one keeps adapting through it \u2014 the PEM near-end model whitens your voice out of the update, and @kalman 1 tracks it per frequency bin (the measured best, no detector, no tuning; see MuTap tests/test_aec.cpp). For the last 20-30 dB, @postfilter 1 engages the full ITU-certified chain: the residual the linear filter cannot reach is suppressed by coherence and replaced with comfort noise matched to the room, so the far end hears neither echo nor a breathing noise floor. @postfilter 2 swaps that suppressor for a small trained network (stronger single-talk echo removal on speech at equal transparency; the classical engine stays the certified default) \u2014 @model loads your own trained weights, and @block follows the model's trained block size. Creation arg = echo-path length in samples (default 2048); partitions = filter length / block."
     }
    },
    {
@@ -688,10 +688,10 @@
      "patching_rect": [
       656.0,
       426.0,
-      360.0,
-      20.0
+      380.0,
+      33.0
      ],
-     "text": "the measured ITU-certified chain (default off; rebuilds; +1 block latency)"
+     "text": "post-filter engine: 0 off, 1 the ITU-certified chain, 2 the learned (neural) chain (rebuilds; +1 block latency)"
     }
    },
    {
@@ -743,6 +743,24 @@
       20.0
      ],
      "text": "comfort-noise fill at the room's noise floor (postfilter only; default on)"
+    }
+   },
+   {
+    "box": {
+     "id": "obj-90",
+     "maxclass": "message",
+     "numinlets": 2,
+     "numoutlets": 1,
+     "outlettype": [
+      ""
+     ],
+     "patching_rect": [
+      550.0,
+      450.0,
+      82.0,
+      22.0
+     ],
+     "text": "postfilter 2"
     }
    }
   ],
@@ -1091,6 +1109,18 @@
      ],
      "source": [
       "obj-41",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-12",
+      0
+     ],
+     "source": [
+      "obj-90",
       0
      ]
     }
