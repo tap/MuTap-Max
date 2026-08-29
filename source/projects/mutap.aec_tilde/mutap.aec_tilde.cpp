@@ -41,6 +41,20 @@
 /// initial receive guard instead of the NLMS gating stack; the right
 /// outlet reports the suppressor's echo-explained fraction instead of IPC.
 ///
+/// @outdoor (with @postfilter 1) swaps the compliance preset for the OUTDOOR
+/// CLOSE-RANGE preset (tap::mu::aec_chain_outdoor_preset): the loudspeaker
+/// within an inch of the mic, in the open — negative ERL, no reverb tail, a
+/// distorting transducer. Short filter geometry (the path is ~8 ms by
+/// physics; the filter-length creation argument is ignored) plus the
+/// multi-branch nonlinear-basis canceller, whose measured story lives in
+/// MuTap's docs/multibranch-canceller.md: against a mildly distorting
+/// speaker (~1 % THD) the send residual improves from -18 to -43 dBm0(A),
+/// and under permanent double-talk the residual drops from 20 dB above the
+/// near-end talker to the talker's level. The branch calibration is pinned
+/// at a -10 dBm0 far-end operating plane and is level-sensitive (the audit
+/// measured ~7 dB of loss at -4 dBm0, ~16 at -16); rigs at a different
+/// reference level should recalibrate in MuTap and build a custom config.
+///
 /// The canceller works on fixed blocks of @block samples, independent of the
 /// host signal vector size: the perform routine gathers samples into
 /// constructor-allocated block buffers, calls process_block() every time a
@@ -127,6 +141,7 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
     bool        m_warp{false};         ///< frequency-warped (music) near-end model on rebuilds
     bool        m_kalman{false};       ///< frequency-domain Kalman core (v2) on rebuilds
     long        m_postfilter{0};       ///< post-filter engine: 0 off, 1 classical chain, 2 learned chain
+    bool        m_outdoor{false};      ///< outdoor close-range preset for the classical chain on rebuilds
     std::string m_model_path{};        ///< learned-engine weights file ("" = built-in model)
     bool        m_comfort{true};       ///< comfort-noise fill inside the chain on rebuilds
     double      m_chain_sr{0.0};       ///< sample rate the active chain was scaled for (0 = none built)
@@ -164,7 +179,9 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
                     "(v2), the measured double-talk winner. @postfilter engages the full measured "
                     "AEC chain — raw Kalman canceller, coherence-driven residual suppressor, comfort "
                     "noise, initial receive guard — the configuration MuTap's ITU-T compliance "
-                    "battery certifies."};
+                    "battery certifies. @outdoor reconfigures that chain for a loudspeaker within "
+                    "an inch of the mic in the open: short geometry plus the multi-branch "
+                    "nonlinear-basis canceller that models the speaker's own distortion."};
     MIN_TAGS{"audio, adaptive, echo, cleaning"};
     MIN_AUTHOR{"MuTap contributors"};
     MIN_RELATED{"mutap.afc~, adc~, dac~, adoutput~"};
@@ -320,6 +337,33 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
                                   }
                                   return {static_cast<int>(m_postfilter)};
                               }}};
+
+    attribute<bool> outdoor{this, "outdoor", false,
+                            description{"Outdoor close-range preset (postfilter 1 only): configure the chain for a "
+                                        "loudspeaker within an inch of the microphone, in the open — echo LOUDER than "
+                                        "the reference at the mic, no room tail, and a transducer that distorts at "
+                                        "outdoor levels. Selects the short filter geometry the physics dictates (the "
+                                        "path is ~8 ms; the filter-length creation argument is ignored) and adds the "
+                                        "multi-branch nonlinear-basis canceller, which models the loudspeaker's own "
+                                        "distortion products the linear filter cannot: against a mildly distorting "
+                                        "speaker (~1 % THD) the measured send residual improves from -18 to "
+                                        "-43 dBm0(A), and under permanent double-talk the residual echo drops from "
+                                        "20 dB above the near-end talker to the talker's level (MuTap "
+                                        "docs/multibranch-canceller.md has every measured number, including the "
+                                        "limits: the branch calibration assumes far-end program near -10 dBm0 and "
+                                        "loses effectiveness at very different levels). Same cost as the certified "
+                                        "chain (measured cost-neutral). Ignored, with a console notice, unless "
+                                        "postfilter is 1. Changing it rebuilds the canceller from scratch (the "
+                                        "learned filter resets)."},
+                            setter{MIN_FUNCTION{
+                                const bool                  value = args[0];
+                                std::lock_guard<std::mutex> lock(m_control_mutex);
+                                m_outdoor = value;
+                                if (m_constructed) {
+                                    publish();
+                                }
+                                return {value};
+                            }}};
 
     attribute<symbol> model{this, "model", "",
                             description{"Learned-engine weights (postfilter 2 only): a path to a trained MUNN "
@@ -509,6 +553,22 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
         return cfg;
     }
 
+    /// The outdoor close-range chain IS the library preset
+    /// (tap::mu::aec_chain_outdoor_preset — short geometry, the Stage 2
+    /// multi-branch winner at its pinned -10 dBm0 calibration plane,
+    /// novelty discount where it can act; its header documents every
+    /// constant and the audit-measured limits). The preset owns the
+    /// partition count (the outdoor path is ~8 ms by physics), so the
+    /// filter-length creation argument is deliberately not consulted.
+    typename chain_aec::config make_outdoor_chain_config(double sr) const {
+        auto cfg                     = tap::mu::aec_chain_outdoor_preset<double>(static_cast<size_t>(m_block_size), sr);
+        cfg.postfilter.comfort_noise = m_comfort;
+        if (!m_gate) {
+            cfg.guard_attenuation_db = 0.0;
+        }
+        return cfg;
+    }
+
     /// The learned-engine chain: same canceller/guard calibration as the
     /// classical preset (tap::mu::aec_chain_nn_preset), post-filter swapped
     /// for the trained model — @model's file, or the built-in weights. The
@@ -529,6 +589,9 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
     /// thread to adopt. Caller holds m_control_mutex.
     void publish() {
         delete m_trash.exchange(nullptr, std::memory_order_acq_rel); // reap
+        if (m_outdoor && m_postfilter != 1) {
+            cout << "outdoor: applies to the classical chain engine only (set postfilter 1)" << endl;
+        }
         try {
             const auto              b = static_cast<size_t>(m_block_size);
             std::unique_ptr<engine> eng;
@@ -553,7 +616,8 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
             }
             else if (m_postfilter == 1) {
                 const double sr = samplerate() > 0.0 ? samplerate() : 48000.0;
-                eng             = std::make_unique<engine>(std::in_place_type<chain_aec>, make_chain_config(sr), b);
+                eng             = std::make_unique<engine>(std::in_place_type<chain_aec>,
+                                               m_outdoor ? make_outdoor_chain_config(sr) : make_chain_config(sr), b);
                 m_chain_sr      = sr;
             }
             else if (m_kalman) {

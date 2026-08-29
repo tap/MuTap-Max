@@ -62,9 +62,16 @@ Early scaffold. Two objects so far:
   16 kHz (`docs/itu-compliance.md` in MuTap), its time constants rescaled
   for the actual block size and sample rate (`@comfort 0` disables the
   fill; one extra block of latency; `@mu`/`@warp`/`@kalman` are ignored
-  and `@gate` selects the receive guard). The help patcher demonstrates
-  fully in-patch — a delay+lowpass chain stands in for the room, so no
-  acoustic loop is needed.
+  and `@gate` selects the receive guard). `@outdoor 1` (with
+  `@postfilter 1`) swaps in the **outdoor close-range** preset — speaker
+  within an inch of the mic, in the open: short filter geometry plus the
+  multi-branch nonlinear-basis canceller that models the loudspeaker's
+  own distortion (measured in MuTap's `docs/multibranch-canceller.md`:
+  send residual −18 → −43 dBm0(A) against a ~1 % THD speaker, and
+  double-talk residual pulled from 20 dB above the talker down to the
+  talker's level, at the same CPU cost as the certified chain). The help
+  patcher demonstrates fully in-patch — a delay+lowpass chain stands in
+  for the room, so no acoustic loop is needed.
 
 ### How feedback cancellation works (one paragraph)
 

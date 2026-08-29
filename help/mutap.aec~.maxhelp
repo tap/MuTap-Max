@@ -762,6 +762,57 @@
      ],
      "text": "postfilter 2"
     }
+   },
+   {
+    "box": {
+     "id": "obj-91",
+     "maxclass": "toggle",
+     "numinlets": 1,
+     "numoutlets": 1,
+     "patching_rect": [
+      520.0,
+      552.0,
+      24.0,
+      24.0
+     ],
+     "outlettype": [
+      "int"
+     ],
+     "parameter_enable": 0
+    }
+   },
+   {
+    "box": {
+     "id": "obj-92",
+     "maxclass": "message",
+     "numinlets": 2,
+     "numoutlets": 1,
+     "patching_rect": [
+      550.0,
+      552.0,
+      80.0,
+      22.0
+     ],
+     "outlettype": [
+      ""
+     ],
+     "text": "outdoor $1"
+    }
+   },
+   {
+    "box": {
+     "id": "obj-93",
+     "maxclass": "comment",
+     "numinlets": 1,
+     "numoutlets": 0,
+     "patching_rect": [
+      640.0,
+      552.0,
+      430.0,
+      20.0
+     ],
+     "text": "outdoor close-range preset: speaker an inch from the mic, distorting driver (postfilter 1 only)"
+    }
    }
   ],
   "lines": [
@@ -1121,6 +1172,30 @@
      ],
      "source": [
       "obj-90",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-92",
+      0
+     ],
+     "source": [
+      "obj-91",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-12",
+      0
+     ],
+     "source": [
+      "obj-92",
       0
      ]
     }

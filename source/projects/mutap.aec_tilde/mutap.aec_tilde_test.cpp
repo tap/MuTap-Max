@@ -31,6 +31,9 @@ SCENARIO("mutap.aec~ instantiates with the documented defaults") {
             REQUIRE(static_cast<int>(my_object.postfilter) == 0);
             REQUIRE(static_cast<bool>(my_object.comfort) == true);
         }
+        THEN("the outdoor close-range preset is off (the certified chain is the default)") {
+            REQUIRE(static_cast<bool>(my_object.outdoor) == false);
+        }
         THEN("the learned engine defaults to the built-in model") {
             const c74::min::symbol current = my_object.model;
             REQUIRE(std::string(current.c_str()).empty());
