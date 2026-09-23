@@ -71,18 +71,23 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/source/min-api/script/min-package.cmake)
 
 # MuTap: the adaptive-filtering core, pinned as the submodules/MuTap
 # submodule. Override with -DMuTap_ROOT=/path/to/MuTap to build against a
-# sibling checkout during development. Header-only apart from the vendored
-# Ooura FFT (MuTap::fft), which the `mutap` interface target carries.
+# sibling checkout during development. Header-only, and so is everything it
+# pulls in: DspTap (tap::dsp, MuTap's submodules/dsptap) carries the real FFT
+# as a C++20 header (the split-radix port of Ooura's rdft), so no library is
+# compiled for either.
 set(MuTap_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/submodules/MuTap"
     CACHE PATH "Path to the MuTap library source tree")
 if (NOT EXISTS "${MuTap_ROOT}/include/mutap/pem_afc.h")
     message(FATAL_ERROR "MuTap not found at ${MuTap_ROOT}. Set -DMuTap_ROOT.")
 endif ()
 
-# Build MuTap's targets so objects can pull in what they need:
-#  - mutap        (interface target: headers + cxx_std_20 + MuTap::fft)
-#  - MuTap::fft   (the vendored Ooura rdft the FDAF core calls)
-# Tests are off here because MuTap is not the top-level project.
+# Add MuTap's targets so objects can link what they need:
+#  - mutap        (interface target: MuTap headers + cxx_std_20 + tap::dsp)
+#  - tap::dsp     (DspTap's interface target: its headers, the FFT included)
+# Both are INTERFACE-only; DspTap's one compiled library, tap_dsp_fft, exists
+# only under its opt-in TAP_DSP_FFT_CMSIS (the bare-metal Cortex-M55 backend),
+# which is OFF for every host build. Tests are off here because MuTap is not
+# the top-level project.
 add_subdirectory(${MuTap_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/mutap EXCLUDE_FROM_ALL)
 
 # Min-Lib, if present (header/static helpers shared across objects).
