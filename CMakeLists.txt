@@ -18,20 +18,21 @@ enable_testing()
 # include) for every target added below, including the MuTap subdirectory.
 if (WIN32)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
-    # min-devkit builds the externals with the static CRT (/MT). The MuTap
-    # core's Ooura FFT target uses CMP0091-NEW, so it would otherwise default
-    # to the dynamic /MD and clash (LNK4098). Force the static runtime on the
-    # policy-NEW targets so every object matches /MT.
+    # min-devkit builds the externals with the static CRT (/MT), but min-api's
+    # max-pretarget.cmake forces it only under a Visual Studio generator (what
+    # CI uses); under any other generator (Ninja + cl, say) it appends
+    # `-static`, which cl ignores. The externals are CMP0091-NEW targets (their
+    # folders require CMake 3.19), so there they would fall back to the dynamic
+    # /MD default. This selects the static runtime for them on every generator,
+    # so an external never depends on the VC++ redistributable. Nothing else
+    # compiled here is policy-NEW: MuTap and DspTap are header-only INTERFACE
+    # targets (the Ooura C library this once existed for is gone), and
+    # min-api's _test executables and mock kernel are created under older
+    # cmake_minimum_required scopes (CMP0091 OLD), which this does not reach.
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     if (MSVC)
         # /bigobj: min-api-heavy TUs can blow past the COFF section limit.
         add_compile_options(/bigobj)
-        # /FIalgorithm: min-api's c74_min_limit.h does `using std::clamp;` without
-        #   including <algorithm>; it resolves transitively on AppleClang/libc++
-        #   but not on MSVC's STL, so force-include it. C++ ONLY — force-including
-        #   a C++ STL header into the C sources (Ooura FFT) trips
-        #   "STL1003: expected C++ compiler".
-        add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/FIalgorithm>)
     endif ()
 endif ()
 
@@ -71,18 +72,23 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/source/min-api/script/min-package.cmake)
 
 # MuTap: the adaptive-filtering core, pinned as the submodules/MuTap
 # submodule. Override with -DMuTap_ROOT=/path/to/MuTap to build against a
-# sibling checkout during development. Header-only apart from the vendored
-# Ooura FFT (MuTap::fft), which the `mutap` interface target carries.
+# sibling checkout during development. Header-only, and so is everything it
+# pulls in: DspTap (tap::dsp, MuTap's submodules/dsptap) carries the real FFT
+# as a C++20 header (the split-radix port of Ooura's rdft), so no library is
+# compiled for either.
 set(MuTap_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/submodules/MuTap"
     CACHE PATH "Path to the MuTap library source tree")
 if (NOT EXISTS "${MuTap_ROOT}/include/mutap/pem_afc.h")
     message(FATAL_ERROR "MuTap not found at ${MuTap_ROOT}. Set -DMuTap_ROOT.")
 endif ()
 
-# Build MuTap's targets so objects can pull in what they need:
-#  - mutap        (interface target: headers + cxx_std_20 + MuTap::fft)
-#  - MuTap::fft   (the vendored Ooura rdft the FDAF core calls)
-# Tests are off here because MuTap is not the top-level project.
+# Add MuTap's targets. Each object links the `mutap` interface target (MuTap
+# exports it also as MuTap::MuTap and tap::mu, the spelling it prefers for new
+# code): MuTap's headers + cxx_std_20, and through it tap::dsp, DspTap's
+# interface target (its headers, the FFT included). Both are INTERFACE-only;
+# DspTap's one compiled library, tap_dsp_fft, exists only under its opt-in
+# TAP_DSP_FFT_CMSIS (the bare-metal Cortex-M55 backend), which is OFF for every
+# host build. Tests are off here because MuTap is not the top-level project.
 add_subdirectory(${MuTap_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/mutap EXCLUDE_FROM_ALL)
 
 # Min-Lib, if present (header/static helpers shared across objects).

@@ -4,7 +4,7 @@
 
 Max/MSP externals for adaptive audio cleaning — acoustic feedback (howling)
 suppression and, later, echo cancellation — built as thin wrappers over the
-**MuTap** library (`mutap::pem_afc` and friends). A Cycling '74 Min-DevKit
+**MuTap** library (`tap::mu::pem_afc` and friends). A Cycling '74 Min-DevKit
 package: one external per folder under `source/projects/`.
 
 The product plan lives in the MuTap library repo:
@@ -18,7 +18,7 @@ M5: scaffold + first external.
 Early scaffold. Two objects so far:
 
 - **`mutap.afc~`** — acoustic feedback canceller. Wraps
-  `mutap::pem_afc<double>` (FDAF-PEM-AFROW; default speech near-end
+  `tap::mu::pem_afc<double>` (FDAF-PEM-AFROW; default speech near-end
   predictor). Inlet 1 (signal): the **microphone** signal `y`; inlet 2
   (signal): the **loudspeaker/reference** signal `u` — the same signal your
   patch sends to the speaker. Outlet 1 (signal): the cleaned signal
@@ -129,6 +129,27 @@ public, so the recursive checkout needs no token.
 (clang-format, clang-tidy naming/braces, and drift checks against the
 canonical TapHouse configs).
 
+## Third-party code
+
+This package's own code is MIT (`LICENSE`). The externals also compile in
+third-party code from the submodules, all of it header-only:
+
+- **DspTap's split-radix real FFT** (via MuTap), a C++20 port of Takuya Ooura's
+  General Purpose FFT Package: a derivative work, not the original package,
+  marked `SPDX-License-Identifier: LicenseRef-Ooura AND MIT`. Ooura's C itself
+  is not compiled into anything this package builds.
+- **readerwriterqueue** (Cameron Desrochers; Simplified BSD, with a zlib part in
+  `atomicops.h`), which min-api's `fifo<>` is built on.
+- **Murmur3** (MIT), min-api's constexpr symbol hash.
+- **min-api** (the Min-API Authors; MIT) and the **Max SDK** headers it carries
+  (Cycling '74; MIT).
+- **MuTap** and **DspTap** themselves (MIT).
+
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) holds each notice verbatim,
+with the file it comes from; redistributions of the built externals should
+include it. For the Ooura port, DspTap's `NOTICE.md` is the canonical statement
+and MuTap's `THIRD_PARTY_NOTICES.md` carries it forward.
+
 ## Roadmap
 
 `HANDOFF.md` in the MuTap library repo is the authority on what gets built
@@ -146,5 +167,7 @@ next. Status of this repo against it:
   "next effort"): the same engine matrix run open loop, with the measured
   double-talk behavior pinned in MuTap's `tests/test_aec.cpp`.
 
-Note the externals compile as **C++20** (MuTap requires it); each project's
-CMakeLists re-raises `CXX_STANDARD` after `min-posttarget.cmake` pins it to 17.
+Note the externals compile as **C++20** (MuTap requires it). `min-posttarget.cmake`
+pins each external, and min-api's test harness each `_test` target, to C++17; the
+root `CMakeLists.txt` raises `CXX_STANDARD` back to 20 on every target an object
+folder creates, in one loop after that folder is added.
