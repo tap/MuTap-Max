@@ -129,6 +129,35 @@ public, so the recursive checkout needs no token.
 (clang-format, clang-tidy naming/braces, and drift checks against the
 canonical TapHouse configs).
 
+## Third-party code
+
+This package's own code is MIT (`LICENSE`). The externals also compile in
+code from its submodules, each under its own terms:
+
+- **MuTap** (`submodules/MuTap`, MIT) and, through it, **DspTap**
+  (`submodules/MuTap/submodules/dsptap`, MIT). Both are header-only; no
+  library is built for either. One part of DspTap is not plain MIT: its real
+  FFT, `include/tap/dsp/fft/split_radix.h`, is a C++20 port of Takuya Ooura's
+  General Purpose FFT Package — a derivative work, not the original package,
+  marked `SPDX-License-Identifier: LicenseRef-Ooura AND MIT` — and it is
+  compiled into every external. Its governing notice:
+
+  > Copyright(C) 1996-2001 Takuya OOURA
+  > (email: ooura@mmm.t.u-tokyo.ac.jp,
+  > download: http://momonga.t.u-tokyo.ac.jp/~ooura/fft.html)
+  > You may use, copy, modify this code for any purpose and without fee.
+  > You may distribute this ORIGINAL package.
+
+  DspTap's `NOTICE.md` is the canonical statement of how the port is
+  redistributed under that notice, and MuTap's `THIRD_PARTY_NOTICES.md`
+  carries it forward. Ooura's C itself is not compiled into anything this
+  package builds.
+- **min-api** (`source/min-api`, MIT, `License.md` there) and the Max SDK
+  headers it carries (`source/min-api/max-sdk-base`, Cycling '74, MIT-style,
+  `LICENSE.md` there).
+
+Redistributions of the built externals should carry these notices forward.
+
 ## Roadmap
 
 `HANDOFF.md` in the MuTap library repo is the authority on what gets built
