@@ -18,10 +18,17 @@ enable_testing()
 # include) for every target added below, including the MuTap subdirectory.
 if (WIN32)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
-    # min-devkit builds the externals with the static CRT (/MT). The MuTap
-    # core's Ooura FFT target uses CMP0091-NEW, so it would otherwise default
-    # to the dynamic /MD and clash (LNK4098). Force the static runtime on the
-    # policy-NEW targets so every object matches /MT.
+    # min-devkit builds the externals with the static CRT (/MT), but min-api's
+    # max-pretarget.cmake forces it only under a Visual Studio generator (what
+    # CI uses); under any other generator (Ninja + cl, say) it appends
+    # `-static`, which cl ignores. The externals are CMP0091-NEW targets (their
+    # folders require CMake 3.19), so there they would fall back to the dynamic
+    # /MD default. This selects the static runtime for them on every generator,
+    # so an external never depends on the VC++ redistributable. Nothing else
+    # compiled here is policy-NEW: MuTap and DspTap are header-only INTERFACE
+    # targets (the Ooura C library this once existed for is gone), and
+    # min-api's _test executables and mock kernel are created under older
+    # cmake_minimum_required scopes (CMP0091 OLD), which this does not reach.
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     if (MSVC)
         # /bigobj: min-api-heavy TUs can blow past the COFF section limit.
