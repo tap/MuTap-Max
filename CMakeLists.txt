@@ -82,13 +82,13 @@ if (NOT EXISTS "${MuTap_ROOT}/include/mutap/pem_afc.h")
     message(FATAL_ERROR "MuTap not found at ${MuTap_ROOT}. Set -DMuTap_ROOT.")
 endif ()
 
-# Add MuTap's targets so objects can link what they need:
-#  - mutap        (interface target: MuTap headers + cxx_std_20 + tap::dsp)
-#  - tap::dsp     (DspTap's interface target: its headers, the FFT included)
-# Both are INTERFACE-only; DspTap's one compiled library, tap_dsp_fft, exists
-# only under its opt-in TAP_DSP_FFT_CMSIS (the bare-metal Cortex-M55 backend),
-# which is OFF for every host build. Tests are off here because MuTap is not
-# the top-level project.
+# Add MuTap's targets. Each object links the `mutap` interface target (MuTap
+# exports it also as MuTap::MuTap and tap::mu, the spelling it prefers for new
+# code): MuTap's headers + cxx_std_20, and through it tap::dsp, DspTap's
+# interface target (its headers, the FFT included). Both are INTERFACE-only;
+# DspTap's one compiled library, tap_dsp_fft, exists only under its opt-in
+# TAP_DSP_FFT_CMSIS (the bare-metal Cortex-M55 backend), which is OFF for every
+# host build. Tests are off here because MuTap is not the top-level project.
 add_subdirectory(${MuTap_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/mutap EXCLUDE_FROM_ALL)
 
 # Min-Lib, if present (header/static helpers shared across objects).

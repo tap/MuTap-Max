@@ -4,7 +4,7 @@
 
 Max/MSP externals for adaptive audio cleaning — acoustic feedback (howling)
 suppression and, later, echo cancellation — built as thin wrappers over the
-**MuTap** library (`mutap::pem_afc` and friends). A Cycling '74 Min-DevKit
+**MuTap** library (`tap::mu::pem_afc` and friends). A Cycling '74 Min-DevKit
 package: one external per folder under `source/projects/`.
 
 The product plan lives in the MuTap library repo:
@@ -18,7 +18,7 @@ M5: scaffold + first external.
 Early scaffold. Two objects so far:
 
 - **`mutap.afc~`** — acoustic feedback canceller. Wraps
-  `mutap::pem_afc<double>` (FDAF-PEM-AFROW; default speech near-end
+  `tap::mu::pem_afc<double>` (FDAF-PEM-AFROW; default speech near-end
   predictor). Inlet 1 (signal): the **microphone** signal `y`; inlet 2
   (signal): the **loudspeaker/reference** signal `u` — the same signal your
   patch sends to the speaker. Outlet 1 (signal): the cleaned signal
@@ -175,5 +175,7 @@ next. Status of this repo against it:
   "next effort"): the same engine matrix run open loop, with the measured
   double-talk behavior pinned in MuTap's `tests/test_aec.cpp`.
 
-Note the externals compile as **C++20** (MuTap requires it); each project's
-CMakeLists re-raises `CXX_STANDARD` after `min-posttarget.cmake` pins it to 17.
+Note the externals compile as **C++20** (MuTap requires it). `min-posttarget.cmake`
+pins each external, and min-api's test harness each `_test` target, to C++17; the
+root `CMakeLists.txt` raises `CXX_STANDARD` back to 20 on every target an object
+folder creates, in one loop after that folder is added.
