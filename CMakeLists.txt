@@ -26,12 +26,6 @@ if (WIN32)
     if (MSVC)
         # /bigobj: min-api-heavy TUs can blow past the COFF section limit.
         add_compile_options(/bigobj)
-        # /FIalgorithm: min-api's c74_min_limit.h does `using std::clamp;` without
-        #   including <algorithm>; it resolves transitively on AppleClang/libc++
-        #   but not on MSVC's STL, so force-include it. C++ ONLY — force-including
-        #   a C++ STL header into the C sources (Ooura FFT) trips
-        #   "STL1003: expected C++ compiler".
-        add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/FIalgorithm>)
     endif ()
 endif ()
 
