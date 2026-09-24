@@ -16,10 +16,16 @@
 ///
 /// Signal inlet 0 is the microphone signal y; signal inlet 1 is the
 /// loudspeaker/reference signal u (the signal the patch sends to the
-/// speaker). Signal outlet 0 is the cleaned signal e = y - F_hat u; the
-/// rightmost outlet reports the IPC double-talk indicator (0..1, low =
-/// near-end speech dominates, high = feedback dominates) every few processed
-/// blocks.
+/// speaker). Signal outlet 0 is the cleaned signal e = y - F_hat u; outlet 1
+/// reports the IPC double-talk indicator (0..1, low = near-end speech
+/// dominates, high = feedback dominates) every few processed blocks; the
+/// rightmost outlet reports two raw convergence statistics on the same
+/// cadence, as the list `uncertainty_db shadow_ratio_db`: the Kalman core's
+/// identification progress (pem_afc::uncertainty_ratio(); 0 dB with the NLMS
+/// core, which has none) and the @shadow comparator's residual power ratio
+/// (pem_afc::shadow_residual_ratio(); 0 dB with @shadow 0). MuTap's
+/// pem_afc.h and fd_kalman.h record what each was measured to catch and
+/// miss; the external applies no threshold — that is the patch's policy.
 ///
 /// The canceller works on fixed blocks of @block samples, independent of the
 /// host signal vector size: the perform routine gathers samples into
@@ -36,11 +42,15 @@
 /// boundary and parks the old one in a trash slot that the control thread
 /// reaps — the audio thread never allocates or frees. Scalar controls (@mu,
 /// @adapt, reset) travel through atomics and are applied on the audio thread.
+/// The shadow comparator's smoothing is a per-block retention, so it is
+/// scaled for the block size and the DSP sample rate at every rebuild, and
+/// a sample-rate change (dspsetup) rebuilds while @shadow is on.
 // SPDX-License-Identifier: MIT
 // Copyright 2026 MuTap contributors
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -85,6 +95,15 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     static constexpr long k_max_block         = 4096;
     static constexpr long k_max_filter_length = 65536;
     static constexpr long k_ipc_report_blocks = 8; ///< IPC report every this many processed blocks
+    /// Most partitions any reachable geometry has (longest filter, smallest
+    /// block): @shadow's setter bound. The build clamps to the actual count.
+    static constexpr long k_max_partitions = k_max_filter_length / k_min_block;
+    /// Physical time constant of the shadow comparator's residual-power
+    /// smoothing: pem_afc's default retention 0.9742 is exp(-64 / (48000 *
+    /// 0.051)), so this keeps that 51 ms at any @block and sample rate.
+    static constexpr double k_shadow_tau_s = 0.051;
+    /// Floor of the linear statistics before the dB conversion (-120 dB).
+    static constexpr double k_stat_floor = 1e-12;
 
     // State lives ABOVE the attributes on purpose: min-api attribute
     // construction invokes the custom setter with the default value, and
@@ -94,13 +113,16 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     // Control-side state (attribute setters may arrive on both the main and
     // the scheduler thread; the mutex serializes them — the audio thread
     // never takes it).
-    std::mutex m_control_mutex;
-    long       m_filter_length{2048}; ///< requested filter length, samples (creation arg)
-    long       m_block_size{256};     ///< requested canceller block size, samples
-    bool       m_gate{true};          ///< IPC/transient robustness layer on rebuilds
-    bool       m_warp{false};         ///< frequency-warped (music) near-end model on rebuilds
-    bool       m_kalman{false};       ///< frequency-domain Kalman core (v2) on rebuilds
-    bool       m_constructed{false};  ///< guards publish() until the constructor body ran
+    mutable std::mutex m_control_mutex;
+    long               m_filter_length{2048}; ///< requested filter length, samples (creation arg)
+    long               m_block_size{256};     ///< requested canceller block size, samples
+    bool               m_gate{true};          ///< IPC/transient robustness layer on rebuilds
+    bool               m_warp{false};         ///< frequency-warped (music) near-end model on rebuilds
+    bool               m_kalman{false};       ///< frequency-domain Kalman core (v2) on rebuilds
+    long               m_shadow{2};           ///< requested shadow-comparator partitions (0 = off) on rebuilds
+    double             m_engine_sr{0.0};      ///< sample rate the last built engine was scaled for (0 = none)
+    size_t             m_engine_shadow{0};    ///< shadow partitions the last built engine was configured with
+    bool               m_constructed{false};  ///< guards publish() until the constructor body ran
 
     // Scalar controls applied by the audio thread every vector (no rebuild).
     std::atomic<double> m_mu{0.5};
@@ -112,14 +134,15 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     std::atomic<engine*> m_pending{nullptr};
     std::atomic<engine*> m_trash{nullptr};
 
-    // Audio-thread-only state. m_ipc_atoms is pre-allocated because the
-    // queue-backed outlet's scalar send() does not compile in this min-api
-    // pin (its unsafe-send path pushes the raw scalar where atoms& is
-    // expected); sending an atoms lvalue takes the path that does. The
-    // queue copy inside min-api is the same cost min.edge~ pays.
+    // Audio-thread-only state. m_ipc_atoms and m_conv_atoms are
+    // pre-allocated because the queue-backed outlet's scalar send() does not
+    // compile in this min-api pin (its unsafe-send path pushes the raw scalar
+    // where atoms& is expected); sending an atoms lvalue takes the path that
+    // does. The queue copy inside min-api is the same cost min.edge~ pays.
     engine* m_active{nullptr};
     long    m_report_countdown{k_ipc_report_blocks};
     atoms   m_ipc_atoms{0.0};
+    atoms   m_conv_atoms{0.0, 0.0}; ///< uncertainty_db, shadow_ratio_db
 
   public:
     MIN_DESCRIPTION{"Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the "
@@ -127,9 +150,11 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
                     "with PEM prewhitening so the closed loop does not bias the estimate "
                     "(FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the "
                     "signal feeding the loudspeaker; the cleaned output is delayed by @block samples. "
-                    "The right outlet reports the IPC double-talk indicator (0..1). @warp selects "
-                    "the frequency-warped near-end model for music/tonal sources; @kalman selects "
-                    "the frequency-domain Kalman engine (v2)."};
+                    "The middle outlet reports the IPC double-talk indicator (0..1); the right outlet "
+                    "reports two raw convergence statistics in dB (uncertainty_db shadow_ratio_db) "
+                    "for the patch to threshold. @warp selects the frequency-warped near-end model "
+                    "for music/tonal sources; @kalman selects the frequency-domain Kalman engine "
+                    "(v2); @shadow sizes the shadow comparator."};
     MIN_TAGS{"audio, adaptive, feedback, howling, cleaning"};
     MIN_AUTHOR{"MuTap contributors"};
     MIN_RELATED{"adc~, dac~, adoutput~"};
@@ -138,6 +163,8 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     inlet<>  m_in_ref{this, "(signal) loudspeaker / reference signal u"};
     outlet<> m_out{this, "(signal) cleaned signal e = y - estimated feedback", "signal"};
     outlet<thread_check::scheduler, thread_action::fifo> m_ipc_out{this, "(float) IPC double-talk indicator, 0..1"};
+    outlet<thread_check::scheduler, thread_action::fifo> m_conv_out{
+        this, "(list) convergence statistics: uncertainty_db shadow_ratio_db"};
 
     /// First creation argument is the feedback-path filter length in samples
     /// (default 2048); partitions = ceil(filter_length / block size).
@@ -245,6 +272,29 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
                                return {value};
                            }}};
 
+    attribute<int> shadow{
+        this, "shadow", 2,
+        description{"Shadow comparator: partitions of a small fast Kalman canceller that adapts beside the main one "
+                    "on the same prewhitened signals (0 = off; default 2, the measured configuration, about 1 % "
+                    "of the canceller's cost at block 64 / 48 kHz / 1024 taps). The value is kept as requested "
+                    "(0-4096) and clamped to the partition count, ceil(filter length / @block), each time the "
+                    "canceller is built, so @shadow 16 @block 64 keeps 16. The right outlet's second value, "
+                    "shadow_ratio_db, is the main / shadow residual power ratio: it rises toward and past 0 dB "
+                    "when the fresh short estimate beats the long one, as after the feedback path moves; it reads "
+                    "0 dB with @shadow 0. Its smoothing keeps a 51 ms time constant at any @block and sample rate. "
+                    "It applies to both engines but was measured with the Kalman engine only (@kalman 1). It does "
+                    "not change the cleaned output. Changing it rebuilds the canceller from scratch (the learned "
+                    "filter resets)."},
+        setter{MIN_FUNCTION{
+            const long                  requested = args[0];
+            std::lock_guard<std::mutex> lock(m_control_mutex);
+            m_shadow = std::clamp(requested, 0L, k_max_partitions);
+            if (m_constructed) {
+                publish();
+            }
+            return {static_cast<int>(m_shadow)};
+        }}};
+
     /// Zero the learned filter and the block buffers (applied on the audio
     /// thread at the next vector, so it does not race the perform routine).
     message<> reset{this, "reset", "Reset the canceller: zero the learned feedback-path estimate.",
@@ -252,6 +302,27 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
                         m_reset_request.store(true, std::memory_order_relaxed);
                         return {};
                     }};
+
+    /// The shadow comparator's smoothing is scaled for the sample rate, so a
+    /// rate change while @shadow is on rebuilds the canceller (with the
+    /// shadow off the engines are rate-agnostic and keep running). min-api
+    /// sets samplerate() before calling this.
+    message<> dspsetup{this, "dspsetup",
+                       MIN_FUNCTION{
+                           std::lock_guard<std::mutex> lock(m_control_mutex);
+                           if (m_constructed && m_shadow != 0 && static_cast<double>(args[0]) != m_engine_sr) {
+                               publish();
+                           }
+                           return {};
+                       }};
+
+    /// Shadow partitions the most recently built canceller was configured
+    /// with (after the clamp to the partition count). Control-side state,
+    /// read on the thread that sets attributes; the unit tests use it.
+    size_t built_shadow_partitions() const {
+        std::lock_guard<std::mutex> lock(m_control_mutex);
+        return m_engine_shadow;
+    }
 
     void operator()(audio_bundle input, audio_bundle output) {
         const auto    frames = input.frame_count();
@@ -314,7 +385,18 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
                         eng.fill = 0;
                         if (--m_report_countdown <= 0) {
                             m_report_countdown = k_ipc_report_blocks;
-                            m_ipc_atoms[0]     = afc.ipc();
+                            // Right to left, Max's outlet order. The NLMS core
+                            // keeps no state uncertainty: report 1 (0 dB),
+                            // "nothing identified", the conservative reading.
+                            // The shadow ratio is exactly 1 with @shadow 0.
+                            double uncertainty = 1.0;
+                            if constexpr (requires { afc.uncertainty_ratio(); }) {
+                                uncertainty = afc.uncertainty_ratio();
+                            }
+                            m_conv_atoms[0] = to_db(uncertainty);
+                            m_conv_atoms[1] = to_db(afc.shadow_residual_ratio());
+                            m_conv_out.send(m_conv_atoms);
+                            m_ipc_atoms[0] = afc.ipc();
                             m_ipc_out.send(m_ipc_atoms);
                         }
                     }
@@ -324,17 +406,42 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     }
 
   private:
+    /// 10 log10 of a linear power ratio, floored at k_stat_floor so digital
+    /// silence and a zero ratio stay finite. Audio thread; allocation-free.
+    static double to_db(double ratio) noexcept { return 10.0 * std::log10(std::max(ratio, k_stat_floor)); }
+
+    /// Partition count of the main filter for the current control state.
+    size_t partition_count() const {
+        const auto b = static_cast<size_t>(m_block_size);
+        return std::max<size_t>(1, (static_cast<size_t>(m_filter_length) + b - 1) / b);
+    }
+
+    /// Shadow partitions the next build uses: the request, clamped to the
+    /// main filter's partition count (the setter bounds it only by
+    /// k_max_partitions, so @block and the filter length can change the
+    /// count in either direction without losing the request).
+    size_t shadow_in_use() const { return std::min(static_cast<size_t>(m_shadow), partition_count()); }
+
+    /// The shadow comparator's fields, shared by both core families: the
+    /// clamped partition count and the per-block power retention
+    /// beta = exp(-block / (fs * tau)) that holds tau at k_shadow_tau_s.
+    template <typename Config>
+    void set_shadow(Config& cfg, double sample_rate) const {
+        cfg.shadow_partitions = shadow_in_use();
+        cfg.shadow_smoothing  = std::exp(-static_cast<double>(cfg.fdaf.block_size) / (sample_rate * k_shadow_tau_s));
+    }
+
     /// Assemble a pem_afc config from the current control-side state; the two
     /// instantiations share every field this external sets (the predictor
     /// configs differ, but both have analysis_capacity). The clamping in the
     /// setters keeps every constraint satisfied, so the canceller constructor
     /// does not throw for any reachable combination.
     template <typename Afc>
-    typename Afc::config make_config() const {
+    typename Afc::config make_config(double sample_rate) const {
         typename Afc::config cfg;
         const auto           b          = static_cast<size_t>(m_block_size);
         cfg.fdaf.block_size             = b;
-        cfg.fdaf.partitions             = std::max<size_t>(1, (static_cast<size_t>(m_filter_length) + b - 1) / b);
+        cfg.fdaf.partitions             = partition_count();
         cfg.fdaf.step_size              = m_mu.load(std::memory_order_relaxed);
         cfg.fdaf.ipc_step_scaling       = m_gate || m_warp; // the warped whitener requires the IPC scale
         cfg.fdaf.transient_freeze_ratio = m_gate ? 4.0 : 0.0;
@@ -342,20 +449,22 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
         // both operands are powers of two, so the max is always a multiple.
         cfg.analysis_window             = std::max<size_t>(2 * b, 1024);
         cfg.predictor.analysis_capacity = std::max(cfg.predictor.analysis_capacity, cfg.analysis_window);
+        set_shadow(cfg, sample_rate);
         return cfg;
     }
 
     /// Same, for the Kalman-core instantiations: no step size and no IPC
     /// options exist; @gate maps to the opt-in transient (burst) floor.
     template <typename Afc>
-    typename Afc::config make_kalman_config() const {
+    typename Afc::config make_kalman_config(double sample_rate) const {
         typename Afc::config cfg;
         const auto           b          = static_cast<size_t>(m_block_size);
         cfg.fdaf.block_size             = b;
-        cfg.fdaf.partitions             = std::max<size_t>(1, (static_cast<size_t>(m_filter_length) + b - 1) / b);
+        cfg.fdaf.partitions             = partition_count();
         cfg.fdaf.transient_floor_ratio  = m_gate ? 8.0 : 0.0;
         cfg.analysis_window             = std::max<size_t>(2 * b, 1024);
         cfg.predictor.analysis_capacity = std::max(cfg.predictor.analysis_capacity, cfg.analysis_window);
+        set_shadow(cfg, sample_rate);
         return cfg;
     }
 
@@ -364,17 +473,22 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     void publish() {
         delete m_trash.exchange(nullptr, std::memory_order_acq_rel); // reap
         try {
+            // min-api initializes samplerate() to the global rate and updates
+            // it to the chain's rate before dspsetup.
+            const double            sr = samplerate() > 0.0 ? samplerate() : 48000.0;
             std::unique_ptr<engine> eng;
             if (m_kalman) {
                 eng = m_warp ? std::make_unique<engine>(std::in_place_type<kalman_warped_afc>,
-                                                        make_kalman_config<kalman_warped_afc>())
+                                                        make_kalman_config<kalman_warped_afc>(sr))
                              : std::make_unique<engine>(std::in_place_type<kalman_speech_afc>,
-                                                        make_kalman_config<kalman_speech_afc>());
+                                                        make_kalman_config<kalman_speech_afc>(sr));
             }
             else {
-                eng = m_warp ? std::make_unique<engine>(std::in_place_type<warped_afc>, make_config<warped_afc>())
-                             : std::make_unique<engine>(std::in_place_type<speech_afc>, make_config<speech_afc>());
+                eng = m_warp ? std::make_unique<engine>(std::in_place_type<warped_afc>, make_config<warped_afc>(sr))
+                             : std::make_unique<engine>(std::in_place_type<speech_afc>, make_config<speech_afc>(sr));
             }
+            m_engine_sr     = sr;
+            m_engine_shadow = shadow_in_use();
             // A still-unadopted previous pending engine comes back to us here
             // and is deleted — the audio thread only ever sees the newest one.
             delete m_pending.exchange(eng.release(), std::memory_order_acq_rel);
