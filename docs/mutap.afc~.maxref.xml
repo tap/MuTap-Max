@@ -7,7 +7,7 @@
 <c74object name='mutap.afc~' category='audio,  adaptive,  feedback,  howling,  cleaning'>
 
 	<digest>Acoustic feedback (howling) canceller</digest>
-	<description>Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the loudspeaker-to-microphone feedback path from the microphone signal, adapted with PEM prewhitening so the closed loop does not bias the estimate (FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the signal feeding the loudspeaker; the cleaned output is delayed by @block samples. The right outlet reports the IPC double-talk indicator (0..1). @warp selects the frequency-warped near-end model for music/tonal sources; @kalman selects the frequency-domain Kalman engine (v2). </description>
+	<description>Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the loudspeaker-to-microphone feedback path from the microphone signal, adapted with PEM prewhitening so the closed loop does not bias the estimate (FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the signal feeding the loudspeaker; the cleaned output is delayed by @block samples. The middle outlet reports the IPC double-talk indicator (0..1); the right outlet reports two raw convergence statistics in dB (uncertainty_db shadow_ratio_db) for the patch to threshold. @warp selects the frequency-warped near-end model for music/tonal sources; @kalman selects the frequency-domain Kalman engine (v2); @shadow sizes the shadow comparator. </description>
 
 
 	<!--METADATA-->
@@ -69,6 +69,11 @@
 		<attribute name='warp' get='1' set='1' type='long' size='1' >
 			<digest>Frequency-warped (music/tonal) near-end model</digest>
 			<description>Near-end model: off = the speech cascade (short-term LP + pitch tap), on = the frequency-warped LP built for music/tonal sources — sustained low chords whose packed bass partials defeat the speech model. With the classic engine, warp keeps IPC step scaling on regardless of gate (the warped whitener requires it for room-robust stability); with the Kalman engine no pairing is needed. Changing it rebuilds the canceller from scratch (the learned filter resets). </description>
+		</attribute>
+
+		<attribute name='shadow' get='1' set='1' type='long' size='1' >
+			<digest>Shadow comparator partitions (0 = off)</digest>
+			<description>Shadow comparator: partitions of a small fast Kalman canceller that adapts beside the main one on the same prewhitened signals (0 = off; default 2, the measured configuration, about 1 % of the canceller's cost at block 64 / 48 kHz / 1024 taps; the value is kept as requested (0-4096) and clamped to the partition count, ceil(filter length / block), each time the canceller is built, so shadow 16 with block 64 keeps 16). The right outlet's second value, shadow_ratio_db, is the main / shadow residual power ratio: it rises toward and past 0 dB when the fresh short estimate beats the long one, as after the feedback path moves; it reads 0 dB with shadow 0. Its smoothing keeps a 51 ms time constant at any block size and sample rate (a sample-rate change rebuilds while it is on). It applies to both engines but was measured with the Kalman engine only (kalman 1). It does not change the cleaned output. Changing it rebuilds the canceller from scratch (the learned filter resets). </description>
 		</attribute>
 
 		<attribute name='kalman' get='1' set='1' type='long' size='1' >

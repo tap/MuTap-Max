@@ -13,7 +13,7 @@
    60.0,
    80.0,
    980.0,
-   660.0
+   820.0
   ],
   "bglocked": 0,
   "openinpresentation": 0,
@@ -58,7 +58,7 @@
       700.0,
       40.0
      ],
-     "text": "Acoustic feedback (howling) canceller. Left inlet: the microphone. Right inlet: the SAME signal the patch sends to the speaker (the reference). Left outlet: the cleaned mic, delayed by @block samples. Right outlet: the IPC double-talk indicator (0..1)."
+     "text": "Acoustic feedback (howling) canceller. Left inlet: the microphone. Right inlet: the SAME signal the patch sends to the speaker (the reference). Left outlet: the cleaned mic, delayed by @block samples. Middle outlet: the IPC double-talk indicator (0..1). Right outlet: the convergence statistics, uncertainty_db shadow_ratio_db."
     }
    },
    {
@@ -85,7 +85,7 @@
      "id": "obj-4",
      "maxclass": "newobj",
      "numinlets": 2,
-     "numoutlets": 2,
+     "numoutlets": 3,
      "patching_rect": [
       40.0,
       200.0,
@@ -95,6 +95,7 @@
      "text": "mutap.afc~ 2048",
      "outlettype": [
       "signal",
+      "",
       ""
      ]
     }
@@ -178,7 +179,7 @@
       420.0,
       22.0
      ],
-     "text": "IPC 0..1 (right outlet): high = feedback dominates (adapting hard), low = you are talking (double-talk, updates gated). Meter it to watch the M4 robustness layer work."
+     "text": "IPC 0..1 (middle outlet): high = feedback dominates (adapting hard), low = you are talking (double-talk, updates gated). Meter it to watch the M4 robustness layer work."
     }
    },
    {
@@ -516,6 +517,333 @@
      "outlettype": [],
      "text": "v2 Kalman engine: mu ignored, gate = burst floor (default off; rebuilds)"
     }
+   },
+   {
+    "box": {
+     "id": "obj-30",
+     "maxclass": "newobj",
+     "numinlets": 1,
+     "numoutlets": 2,
+     "patching_rect": [
+      180.0,
+      314.0,
+      150.0,
+      22.0
+     ],
+     "text": "unpack 0. 0.",
+     "outlettype": [
+      "float",
+      "float"
+     ]
+    }
+   },
+   {
+    "box": {
+     "id": "obj-31",
+     "maxclass": "flonum",
+     "numinlets": 1,
+     "numoutlets": 2,
+     "patching_rect": [
+      180.0,
+      344.0,
+      60.0,
+      22.0
+     ],
+     "outlettype": [
+      "",
+      "bang"
+     ]
+    }
+   },
+   {
+    "box": {
+     "id": "obj-32",
+     "maxclass": "flonum",
+     "numinlets": 1,
+     "numoutlets": 2,
+     "patching_rect": [
+      310.0,
+      344.0,
+      60.0,
+      22.0
+     ],
+     "outlettype": [
+      "",
+      "bang"
+     ]
+    }
+   },
+   {
+    "box": {
+     "id": "obj-33",
+     "maxclass": "comment",
+     "numinlets": 1,
+     "numoutlets": 0,
+     "patching_rect": [
+      100.0,
+      370.0,
+      150.0,
+      34.0
+     ],
+     "text": "uncertainty dB (Kalman core; 0 dB with NLMS)"
+    }
+   },
+   {
+    "box": {
+     "id": "obj-34",
+     "maxclass": "comment",
+     "numinlets": 1,
+     "numoutlets": 0,
+     "patching_rect": [
+      260.0,
+      370.0,
+      210.0,
+      34.0
+     ],
+     "text": "shadow ratio dB (0 dB with @shadow 0)"
+    }
+   },
+   {
+    "box": {
+     "id": "obj-35",
+     "maxclass": "comment",
+     "numinlets": 1,
+     "numoutlets": 0,
+     "patching_rect": [
+      100.0,
+      404.0,
+      370.0,
+      50.0
+     ],
+     "text": "Right outlet, every 8 blocks: raw statistics, no thresholds. Uncertainty: sum P / sum P at reset (0 dB = nothing identified; falls as the path is learned). Shadow ratio: main / shadow residual power; rises toward 0 dB and past it when the path moves."
+    }
+   },
+   {
+    "box": {
+     "id": "obj-36",
+     "maxclass": "message",
+     "numinlets": 2,
+     "numoutlets": 1,
+     "patching_rect": [
+      480.0,
+      392.0,
+      64.0,
+      22.0
+     ],
+     "text": "shadow 2",
+     "outlettype": [
+      ""
+     ]
+    }
+   },
+   {
+    "box": {
+     "id": "obj-37",
+     "maxclass": "message",
+     "numinlets": 2,
+     "numoutlets": 1,
+     "patching_rect": [
+      550.0,
+      392.0,
+      64.0,
+      22.0
+     ],
+     "text": "shadow 0",
+     "outlettype": [
+      ""
+     ]
+    }
+   },
+   {
+    "box": {
+     "id": "obj-38",
+     "maxclass": "comment",
+     "numinlets": 1,
+     "numoutlets": 0,
+     "patching_rect": [
+      620.0,
+      392.0,
+      350.0,
+      48.0
+     ],
+     "text": "shadow comparator partitions (default 2, 0 = off; clamped to the partition count at each build; rebuilds). Measured with the Kalman engine only."
+    }
+   },
+   {
+    "box": {
+     "id": "obj-39",
+     "maxclass": "comment",
+     "numinlets": 1,
+     "numoutlets": 0,
+     "patching_rect": [
+      20.0,
+      530.0,
+      700.0,
+      22.0
+     ],
+     "text": "Example convergence policy (patch-side: mutap.afc~ applies no thresholds)",
+     "fontface": 1
+    }
+   },
+   {
+    "box": {
+     "id": "obj-40",
+     "maxclass": "newobj",
+     "numinlets": 2,
+     "numoutlets": 1,
+     "patching_rect": [
+      40.0,
+      560.0,
+      230.0,
+      22.0
+     ],
+     "text": "expr ($f1 < -23.8) && ($f2 < -1.24)",
+     "outlettype": [
+      ""
+     ]
+    }
+   },
+   {
+    "box": {
+     "id": "obj-41",
+     "maxclass": "newobj",
+     "numinlets": 1,
+     "numoutlets": 3,
+     "patching_rect": [
+      40.0,
+      590.0,
+      50.0,
+      22.0
+     ],
+     "text": "change",
+     "outlettype": [
+      "",
+      "int",
+      "int"
+     ]
+    }
+   },
+   {
+    "box": {
+     "id": "obj-42",
+     "maxclass": "newobj",
+     "numinlets": 1,
+     "numoutlets": 2,
+     "patching_rect": [
+      40.0,
+      620.0,
+      50.0,
+      22.0
+     ],
+     "text": "t b i",
+     "outlettype": [
+      "bang",
+      "int"
+     ]
+    }
+   },
+   {
+    "box": {
+     "id": "obj-43",
+     "maxclass": "newobj",
+     "numinlets": 2,
+     "numoutlets": 1,
+     "patching_rect": [
+      40.0,
+      650.0,
+      70.0,
+      22.0
+     ],
+     "text": "delay 300",
+     "outlettype": [
+      "bang"
+     ]
+    }
+   },
+   {
+    "box": {
+     "id": "obj-44",
+     "maxclass": "newobj",
+     "numinlets": 2,
+     "numoutlets": 1,
+     "patching_rect": [
+      40.0,
+      680.0,
+      40.0,
+      22.0
+     ],
+     "text": "i",
+     "outlettype": [
+      "int"
+     ]
+    }
+   },
+   {
+    "box": {
+     "id": "obj-45",
+     "maxclass": "newobj",
+     "numinlets": 1,
+     "numoutlets": 3,
+     "patching_rect": [
+      40.0,
+      710.0,
+      50.0,
+      22.0
+     ],
+     "text": "change",
+     "outlettype": [
+      "",
+      "int",
+      "int"
+     ]
+    }
+   },
+   {
+    "box": {
+     "id": "obj-46",
+     "maxclass": "toggle",
+     "numinlets": 1,
+     "numoutlets": 1,
+     "patching_rect": [
+      40.0,
+      740.0,
+      24.0,
+      24.0
+     ],
+     "outlettype": [
+      "int"
+     ]
+    }
+   },
+   {
+    "box": {
+     "id": "obj-47",
+     "maxclass": "comment",
+     "numinlets": 1,
+     "numoutlets": 0,
+     "patching_rect": [
+      70.0,
+      742.0,
+      220.0,
+      20.0
+     ],
+     "text": "converged (each state held 0.3 s)"
+    }
+   },
+   {
+    "box": {
+     "id": "obj-48",
+     "maxclass": "comment",
+     "numinlets": 1,
+     "numoutlets": 0,
+     "patching_rect": [
+      300.0,
+      560.0,
+      660.0,
+      180.0
+     ],
+     "text": "\"Converged\" when uncertainty < -23.8 dB AND shadow ratio < -1.24 dB; a state flips only after the condition has held 0.3 s on the other side (delay 300 restarts on every change). Needs @kalman 1: with the NLMS core the uncertainty reads 0 dB and this never says converged.\n\nThese thresholds were calibrated at @block 64 / 48 kHz on 1024- and 2048-tap filters with @kalman 1 and @shadow 2 (medians over 50 cold starts in MuTap's convergence-indicator experiment). They are a calibration for that loop, not constants: recalibrate for any other block size, rate, filter length or room.\n\nMeasured there: it detects a walk to a different room at the change, but reports reconvergence 0.13-0.26 s early (ahead of the filter's measured misalignment). The uncertainty statistic regrows in digital silence, so a silent input drifts back to not converged."
+    }
    }
   ],
   "lines": [
@@ -731,6 +1059,174 @@
      ],
      "destination": [
       "obj-4",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-30",
+      0
+     ],
+     "source": [
+      "obj-4",
+      2
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-31",
+      0
+     ],
+     "source": [
+      "obj-30",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-32",
+      0
+     ],
+     "source": [
+      "obj-30",
+      1
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-4",
+      0
+     ],
+     "source": [
+      "obj-36",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-4",
+      0
+     ],
+     "source": [
+      "obj-37",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-40",
+      0
+     ],
+     "source": [
+      "obj-30",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-40",
+      1
+     ],
+     "source": [
+      "obj-30",
+      1
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-41",
+      0
+     ],
+     "source": [
+      "obj-40",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-42",
+      0
+     ],
+     "source": [
+      "obj-41",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-44",
+      1
+     ],
+     "source": [
+      "obj-42",
+      1
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-43",
+      0
+     ],
+     "source": [
+      "obj-42",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-44",
+      0
+     ],
+     "source": [
+      "obj-43",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-45",
+      0
+     ],
+     "source": [
+      "obj-44",
+      0
+     ]
+    }
+   },
+   {
+    "patchline": {
+     "destination": [
+      "obj-46",
+      0
+     ],
+     "source": [
+      "obj-45",
       0
      ]
     }

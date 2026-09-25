@@ -25,8 +25,21 @@ Early scaffold. Two objects so far:
   `e = y − F̂·u`. Outlet 2 (float): the **IPC** double-talk indicator, 0..1,
   reported every few processed blocks (low = near-end speech dominates and
   adaptation is being gated; high = feedback dominates the error and the
-  update is informative). Creation arg: feedback-path filter length in
-  samples (default 2048); `partitions = ceil(filter_length / block)`.
+  update is informative). Outlet 3 (list): two raw **convergence
+  statistics**, `uncertainty_db shadow_ratio_db`, on the same cadence, each
+  `10·log10(max(x, 1e-12))` of a linear ratio. `uncertainty_db` is the
+  Kalman core's identification progress, ΣP / ΣP at reset (0 dB = nothing
+  identified, falling as the path is learned; it reads 0 dB with the NLMS
+  core, which keeps no uncertainty — the conservative reading).
+  `shadow_ratio_db` is the main filter's residual power over the shadow
+  comparator's (see `shadow`): below 0 dB while the long filter out-cancels
+  the short fast one, rising toward and past 0 dB when the path moves; it
+  reads 0 dB with `@shadow 0`. The external applies **no thresholds** —
+  that is the patch's policy; MuTap's `pem_afc.h` and `fd_kalman.h` record
+  what each statistic was measured to catch and miss, and the help patcher
+  carries an example policy with its calibration conditions. Creation arg:
+  feedback-path filter length in samples (default 2048);
+  `partitions = ceil(filter_length / block)`.
   Attributes: `block` (canceller block size, default 256, power of two —
   changing it rebuilds the canceller), `mu` (NLMS step size in (0, 2),
   default 0.5, applied live), `adapt` (freeze/resume adaptation, default
@@ -40,7 +53,16 @@ Early scaffold. Two objects so far:
   off = the classic NLMS update, on = the frequency-domain Kalman filter,
   MuTap's v2 core — `mu` is ignored, `gate` selects the burst floor
   instead, the IPC outlet reports 0, and the warped model needs no IPC
-  pairing — changing it rebuilds). `reset` message zeroes the
+  pairing — changing it rebuilds), `shadow` (shadow-comparator partitions,
+  default 2, 0 = off; kept as requested, 0–4096, and clamped to the
+  partition count each time the canceller is built: a small fast Kalman
+  canceller adapting beside the main one on the same prewhitened signals,
+  about 1 % of the canceller's cost as measured in MuTap at block 64 /
+  48 kHz / 1024 taps; its power smoothing is rescaled to keep a 51 ms time
+  constant at any `block` and sample rate, so a sample-rate change rebuilds
+  while it is on; it applies to both engines but was measured with the
+  Kalman engine only, and it does not change the cleaned output — changing
+  it rebuilds). `reset` message zeroes the
   learned filter. **Adds exactly `block` samples of latency** on the cleaned
   output (the block-processing hop), independent of the host vector size.
 
