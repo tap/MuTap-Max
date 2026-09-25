@@ -379,9 +379,13 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
             // and is deleted — the audio thread only ever sees the newest one.
             delete m_pending.exchange(eng.release(), std::memory_order_acq_rel);
         }
-        catch (const std::exception&) {
+        catch (const std::exception& ex) {
             // Defensive: leave the current canceller running (the perform path
-            // falls back to the dry microphone signal if none exists yet).
+            // falls back to the dry microphone signal if none exists yet) and
+            // say why. The setters' clamping keeps every configuration MuTap's
+            // validation (the FFT size gate included) accepts, so this is not
+            // expected to fire.
+            cerr << "engine rebuild failed: " << ex.what() << endl;
         }
     }
 };

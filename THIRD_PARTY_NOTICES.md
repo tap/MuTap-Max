@@ -21,10 +21,15 @@ legal advice.
   `SPDX-License-Identifier: LicenseRef-Ooura AND MIT`: Ooura's notice governs the
   derived portion (the transform), MIT the rest. Every external runs it through
   `tap::dsp::basic_real_fft` in MuTap's frequency-domain cores. Ooura's C itself is not
-  compiled into anything this package builds.
+  compiled into anything this package builds, and at the pinned DspTap (0db95b6) it is
+  not in the tree at all: DspTap's test-only reference copy was deleted at its Decision
+  D6, and the port's bit identity with the C is held by pinned fingerprints
+  (`submodules/MuTap/submodules/dsptap/tests/test_fft_split_radix_fingerprint.cpp`).
 - **Canonical statement:** DspTap's `NOTICE.md` (how the port is redistributed under
-  this notice, and why), carried forward by MuTap's `THIRD_PARTY_NOTICES.md`. The
-  upstream package readme is kept at `submodules/MuTap/submodules/dsptap/third_party/ooura/readme.txt`.
+  this notice, and why), carried forward by MuTap's `THIRD_PARTY_NOTICES.md`. DspTap's
+  license record for the port is the upstream package readme, kept at
+  `submodules/MuTap/submodules/dsptap/third_party/ooura/readme.txt`, together with
+  `LICENSES/LicenseRef-Ooura.txt` (quoted below).
 - **Notice**, verbatim from `submodules/MuTap/submodules/dsptap/LICENSES/LicenseRef-Ooura.txt`:
 
 ```text

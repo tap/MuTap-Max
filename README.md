@@ -137,7 +137,9 @@ third-party code from the submodules, all of it header-only:
 - **DspTap's split-radix real FFT** (via MuTap), a C++20 port of Takuya Ooura's
   General Purpose FFT Package: a derivative work, not the original package,
   marked `SPDX-License-Identifier: LicenseRef-Ooura AND MIT`. Ooura's C itself
-  is not compiled into anything this package builds.
+  is not compiled into anything this package builds, and is not in the tree:
+  DspTap deleted its test-only reference copy (Decision D6) and holds the port's
+  bit identity by pinned fingerprints.
 - **readerwriterqueue** (Cameron Desrochers; Simplified BSD, with a zlib part in
   `atomicops.h`), which min-api's `fifo<>` is built on.
 - **Murmur3** (MIT), min-api's constexpr symbol hash.
