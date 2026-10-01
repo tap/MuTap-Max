@@ -69,15 +69,6 @@
 #include <vector>
 
 #include "c74_min.h"
-
-// On Windows the Max SDK includes <windows.h>, whose rpcndr.h does
-// `#define small char`; DspTap's srdif engine (tap/dsp/fft/srdif.h) names
-// locals `small`, so the macro must be gone before MuTap's headers. Nothing
-// in this file uses the RPC macro.
-#ifdef small
-#undef small
-#endif
-
 #include "mutap/fd_kalman.h"
 #include "mutap/nn_chain.h"
 #include "mutap/pem_afc.h"

@@ -17,7 +17,7 @@ legal advice.
 ## Ooura FFT: license record only (no code at the pinned DspTap)
 
 - **What is compiled in: none of it, in DspTap's maintainer's judgement.** At the
-  pinned DspTap (`d9c1e33`, through MuTap `0f07a17`) every transform the externals
+  pinned DspTap (`2137d86`, through MuTap `37688bf`) every transform the externals
   run, through `tap::dsp::basic_real_fft` in MuTap's frequency-domain cores, is
   DspTap's srdif engine,
   `submodules/MuTap/submodules/dsptap/include/tap/dsp/fft/srdif.h`: a split-radix
