@@ -156,12 +156,13 @@ canonical TapHouse configs).
 This package's own code is MIT (`LICENSE`). The externals also compile in
 third-party code from the submodules, all of it header-only:
 
-- **DspTap's split-radix real FFT** (via MuTap), a C++20 port of Takuya Ooura's
-  General Purpose FFT Package: a derivative work, not the original package,
-  marked `SPDX-License-Identifier: LicenseRef-Ooura AND MIT`. Ooura's C itself
-  is not compiled into anything this package builds, and is not in the tree:
-  DspTap deleted its test-only reference copy (Decision D6) and holds the port's
-  bit identity by pinned fingerprints.
+- **No Ooura FFT code.** The real FFT the externals run (via MuTap) is DspTap's
+  srdif engine, written from the published literature under a clean-room
+  procedure and MIT (tap/DspTap#42). Externals built from this repository's
+  trees before the srdif bump compiled DspTap's C++20 port of Takuya Ooura's
+  `rdft` (a derivative work marked `SPDX-License-Identifier: LicenseRef-Ooura AND
+  MIT`); the notices file records that history and keeps Ooura's notice for
+  them.
 - **readerwriterqueue** (Cameron Desrochers; Simplified BSD, with a zlib part in
   `atomicops.h`), which min-api's `fifo<>` is built on.
 - **Murmur3** (MIT), min-api's constexpr symbol hash.
@@ -171,8 +172,8 @@ third-party code from the submodules, all of it header-only:
 
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) holds each notice verbatim,
 with the file it comes from; redistributions of the built externals should
-include it. For the Ooura port, DspTap's `NOTICE.md` is the canonical statement
-and MuTap's `THIRD_PARTY_NOTICES.md` carries it forward.
+include it. For the Ooura history, DspTap's `NOTICE.md` is the canonical
+statement and MuTap's `THIRD_PARTY_NOTICES.md` carries it forward.
 
 ## Roadmap
 

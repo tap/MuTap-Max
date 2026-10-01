@@ -74,8 +74,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/source/min-api/script/min-package.cmake)
 # submodule. Override with -DMuTap_ROOT=/path/to/MuTap to build against a
 # sibling checkout during development. Header-only, and so is everything it
 # pulls in: DspTap (tap::dsp, MuTap's submodules/dsptap) carries the real FFT
-# as a C++20 header (the split-radix port of Ooura's rdft), so no library is
-# compiled for either.
+# as a C++20 header (the srdif engine), so no library is compiled for either.
 set(MuTap_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/submodules/MuTap"
     CACHE PATH "Path to the MuTap library source tree")
 if (NOT EXISTS "${MuTap_ROOT}/include/mutap/pem_afc.h")
