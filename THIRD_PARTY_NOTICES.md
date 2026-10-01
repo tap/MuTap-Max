@@ -3,7 +3,8 @@
 MuTap-Max's own code is licensed under the MIT License (see `LICENSE`), © 2026
 MuTap contributors. The externals it builds (`externals/*.mxo`, `externals/*.mxe64`)
 also compile in the third-party code listed below, all of it header-only code reached
-through the submodules. Every notice is quoted **verbatim, byte for byte**, from the
+through the submodules, except the first entry: Ooura's FFT is a license record for
+externals built from this repository's earlier trees. Every notice is quoted **verbatim, byte for byte**, from the
 file named above it, at the submodule pins this repository records (tabs and
 comment markers included where the notice is a source comment). Redistributions of
 the built externals should include this file.
@@ -13,23 +14,34 @@ legal advice.
 
 ---
 
-## Ooura FFT: the C++20 port in DspTap
+## Ooura FFT: license record only (no code at the pinned DspTap)
 
-- **What is compiled in:** `submodules/MuTap/submodules/dsptap/include/tap/dsp/fft/split_radix.h`,
-  DspTap's C++20 port of `rdft` from Takuya Ooura's General Purpose FFT Package. It is
-  a derivative work, not the ORIGINAL package, and is marked
-  `SPDX-License-Identifier: LicenseRef-Ooura AND MIT`: Ooura's notice governs the
-  derived portion (the transform), MIT the rest. Every external runs it through
-  `tap::dsp::basic_real_fft` in MuTap's frequency-domain cores. Ooura's C itself is not
-  compiled into anything this package builds, and at the pinned DspTap (0db95b6) it is
-  not in the tree at all: DspTap's test-only reference copy was deleted at its Decision
-  D6, and the port's bit identity with the C is held by pinned fingerprints
-  (`submodules/MuTap/submodules/dsptap/tests/test_fft_split_radix_fingerprint.cpp`).
-- **Canonical statement:** DspTap's `NOTICE.md` (how the port is redistributed under
-  this notice, and why), carried forward by MuTap's `THIRD_PARTY_NOTICES.md`. DspTap's
-  license record for the port is the upstream package readme, kept at
-  `submodules/MuTap/submodules/dsptap/third_party/ooura/readme.txt`, together with
-  `LICENSES/LicenseRef-Ooura.txt` (quoted below).
+- **What is compiled in: none of it, in DspTap's maintainer's judgement.** At the
+  pinned DspTap (`d9c1e33`, through MuTap `0f07a17`) every transform the externals
+  run, through `tap::dsp::basic_real_fft` in MuTap's frequency-domain cores, is
+  DspTap's srdif engine,
+  `submodules/MuTap/submodules/dsptap/include/tap/dsp/fft/srdif.h`: a split-radix
+  decimation-in-frequency engine written from the published literature under a
+  recorded clean-room procedure, MIT (tap/DspTap#42, tuned for Hexagon in #44). The
+  externals hold the double profiles only, and double always runs srdif. DspTap's
+  fixed-point real post-pass, the other part once transcribed from the package, was
+  re-derived from the literature at tap/DspTap#39; the externals do not instantiate
+  it either way.
+- **History, for externals built from older trees.** Every MuTap-Max tree before
+  this bump compiles DspTap's C++20 port of `rdft`
+  (`include/tap/dsp/fft/split_radix.h`, through MuTap `edf160e` and earlier pins):
+  a derivative work, not the ORIGINAL package, marked
+  `SPDX-License-Identifier: LicenseRef-Ooura AND MIT`, whose redistribution relied on
+  the notice's modification grant. Externals built from those trees carry it, and
+  the notice below applies to them. DspTap's `NOTICE.md` ("Which trees carry what")
+  and MuTap's `THIRD_PARTY_NOTICES.md` give the same history by tree.
+- **Canonical statement:** DspTap's `NOTICE.md` (the judgement, the clean-room
+  records behind it in `docs/fft-design.md`, and its limits; a maintainer
+  judgement, not legal advice), carried forward by MuTap's `THIRD_PARTY_NOTICES.md`.
+  DspTap keeps the license record permanently at
+  `submodules/MuTap/submodules/dsptap/third_party/ooura/readme.txt` and
+  `LICENSES/LicenseRef-Ooura.txt` (quoted below), so the historical trees' SPDX
+  reference resolves to a fixed path.
 - **Notice**, verbatim from `submodules/MuTap/submodules/dsptap/LICENSES/LicenseRef-Ooura.txt`:
 
 ```text
@@ -166,8 +178,11 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## MuTap and DspTap
 
 - **What is compiled in:** MuTap's headers (`submodules/MuTap/include/`) and DspTap's
-  (`submodules/MuTap/submodules/dsptap/include/`); the Ooura-derived part of DspTap is
-  covered above.
+  (`submodules/MuTap/submodules/dsptap/include/`), all MIT at these pins (the Ooura
+  history is above). The externals include `pem_afc.h`, `fd_kalman.h`, `nn_chain.h`
+  and `postfilter.h` and what those include; MuTap's `frequency_shifter.h`, whose
+  Hilbert coefficients MuTap's `THIRD_PARTY_NOTICES.md` records as of unstated
+  licence, is not among them and is compiled into nothing this package builds.
 - **Licence:** MIT. Verbatim from `submodules/MuTap/LICENSE`:
 
 ```text

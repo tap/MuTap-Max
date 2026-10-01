@@ -20,8 +20,8 @@ add_library(
 )
 
 # MuTap's headers (this object includes pem_afc, fd_kalman, nn_chain, postfilter) + tap::dsp (DspTap's
-# headers, among them the split-radix real FFT, a C++20 port of Ooura's rdft,
-# that tap::mu::basic_real_fft re-exports); the `mutap` interface target
+# headers, among them the srdif real FFT engine that tap::mu::basic_real_fft
+# re-exports); the `mutap` interface target
 # carries both, and neither compiles a library.
 target_link_libraries(${PROJECT_NAME} PRIVATE mutap)
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_20)
