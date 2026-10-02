@@ -22,10 +22,12 @@ Early scaffold. Two objects so far:
   predictor). Inlet 1 (signal): the **microphone** signal `y`; inlet 2
   (signal): the **loudspeaker/reference** signal `u` — the same signal your
   patch sends to the speaker. Outlet 1 (signal): the cleaned signal
-  `e = y − F̂·u`. Outlet 2 (float): the **IPC** double-talk indicator, 0..1,
+  `e = y − F̂·u` (times the guard's gain with `@guard 1`, below). Outlet 2
+  (signal): the guard's **post-reverb gain**, linear — exactly 1 with the
+  guard off. Outlet 3 (float): the **IPC** double-talk indicator, 0..1,
   reported every few processed blocks (low = near-end speech dominates and
   adaptation is being gated; high = feedback dominates the error and the
-  update is informative). Outlet 3 (list): two raw **convergence
+  update is informative). Outlet 4 (list): two raw **convergence
   statistics**, `uncertainty_db shadow_ratio_db`, on the same cadence, each
   `10·log10(max(x, 1e-12))` of a linear ratio. `uncertainty_db` is the
   Kalman core's identification progress, ΣP / ΣP at reset (0 dB = nothing
@@ -34,8 +36,8 @@ Early scaffold. Two objects so far:
   `shadow_ratio_db` is the main filter's residual power over the shadow
   comparator's (see `shadow`): below 0 dB while the long filter out-cancels
   the short fast one, rising toward and past 0 dB when the path moves; it
-  reads 0 dB with `@shadow 0`. The external applies **no thresholds** —
-  that is the patch's policy; MuTap's `pem_afc.h` and `fd_kalman.h` record
+  reads 0 dB with `@shadow 0`. Without the guard the external applies **no
+  thresholds** — that is the patch's policy; MuTap's `pem_afc.h` and `fd_kalman.h` record
   what each statistic was measured to catch and miss, and the help patcher
   carries an example policy with its calibration conditions. Creation arg:
   feedback-path filter length in samples (default 2048);
@@ -63,8 +65,68 @@ Early scaffold. Two objects so far:
   while it is on; it applies to both engines but was measured with the
   Kalman engine only, and it does not change the cleaned output — changing
   it rebuilds). `reset` message zeroes the
-  learned filter. **Adds exactly `block` samples of latency** on the cleaned
-  output (the block-processing hop), independent of the host vector size.
+  learned filter (and returns the guard to ARMING). **Adds exactly `block`
+  samples of latency** on the cleaned output (the block-processing hop),
+  independent of the host vector size; the gain outlet is aligned with it.
+
+  **The safety layer, `@guard 1`** (default 0 — off, and then the object
+  is exactly what it was without it: the cleaned output is bit-identical
+  and the gain outlet reads 1). It runs MuTap's `tap::mu::howl_guard<double>`
+  for this one microphone, fed every block with the canceller's own
+  residual and its two statistics, and applies its gain to outlet 1 — the
+  single-mic equivalent of `afc_chain::set_guard()`; MuTap's
+  `include/mutap/howl_guard.h` lists every state and transition, and
+  `docs/howl-guard.md` what was measured. In short: from every (re)build the
+  output sits `@arming` dB down (ARMING) until the verdict —
+  `shadow_ratio_db < @d_db` and `uncertainty_db < @a_db` — has held `@hold`
+  seconds with the howl detector quiet; then it opens. A howl trip (or a
+  lost verdict) ducks it `@duck` dB; it releases on the verdict, or on a
+  re-arm timer (`@rearm` s × 2^strikes); each strike lowers the restore
+  level 3 dB, and three latch. After 10 s in ARMING without a verdict it
+  flags **unprotected**; only a cap opens it then. The guard needs both
+  statistics, as `afc_chain` does: **`@kalman 1` and `@shadow` > 0** —
+  otherwise the object posts an error (once DSP has started) and runs
+  unguarded. Changing `@guard` rebuilds the canceller like `@block`, and a
+  rebuild starts the guard in ARMING.
+  Attributes (all applied live — the audio thread picks the new policy up
+  at the top of the next vector; the main thread never touches a running
+  guard): `cap` (the deployment gain cap in dB, ≤ 0 — MuTap's protocol
+  sets the dry limit − 6 dB — or `none`, the default: with no cap a guard
+  that never sees a verdict stays in ARMING, `@arming` dB down, for as
+  long as that lasts, flagged unprotected; with one it opens to the cap,
+  OPEN_CAPPED), `d_db` / `a_db` (the verdict's thresholds, factory
+  −1.235 / −23.842 dB; setting either replaces a soundcheck calibration),
+  `duck` (20 dB), `hold` (release hold, 1.5 s), `arming` (30 dB), `rearm`
+  (5 s), `cal_s` (soundcheck window, 30 s), `cal_margin_d` / `cal_margin_a`
+  (4 / 3 dB). Messages: `calibrate` starts the soundcheck — the guard
+  samples both statistics for `@cal_s`, then runs on median + margin and
+  outlet 4 sends `calibrate_done d_db a_db` (`calibrate 0` ends it early;
+  store the two numbers and set `@d_db` / `@a_db` to restore a soundcheck
+  later — a rebuild drops a calibration); `clear` clears the back-off
+  (strikes, restore level, latch); `reset` also re-arms. With the guard on,
+  outlet 4's list grows to `uncertainty_db shadow_ratio_db guard_state
+  gain_db unprotected strikes`, where `guard_state` is a symbol (`arming`,
+  `open`, `open_capped`, `ducked`, `releasing`, `latched` — route it with
+  `sel`), `gain_db` the guard's gain at the end of the last block,
+  `unprotected` 0/1 and `strikes` an int. Outlet 2 is the library's **bus
+  stage** for a patch with a reverb after the object: 1 except while the
+  guard is ducked or releasing, where it is the duck relative to the
+  restore level — multiply the reverb's output by it (`*~`) and a trip cuts
+  a charged reverb tail too (the per-mic gain is already on outlet 1, so
+  ARMING and strike levels are not applied twice).
+  **Limitation: one object is one mic, and two objects duck
+  independently.** The library's multi-mic attribution (which mic a shared
+  howl belongs to, the duck-all fallback) lives in `afc_chain` and has no
+  equivalent here; with several objects summed into one bus, each guard
+  sees only its own residual. To repeat the library's bus stage over
+  several mics, feed the reverb's output through `*~` by the `minimum~` of
+  their gain outlets (the library takes the deepest duck among the mics).
+  The guard's howl detector keeps MuTap's defaults (a loop period of 10 ms,
+  a −6 dB re 1.0 ceiling on the residual's block RMS) except where the
+  geometry forces a change: its fit window spans at least 3 blocks (from
+  `@block` 512 at 48 kHz) and its top band stays under 0.45 × the sample
+  rate (below 35.6 kHz). The guard's measurements in MuTap are at block 64,
+  48 kHz, 1024 taps; this object defaults to block 256 and 2048 taps.
 
 - **`mutap.aec~`** — acoustic **echo** canceller: the open-loop cousin of
   `mutap.afc~`, for the case where a clean far-end reference exists (the
@@ -180,6 +242,9 @@ statement and MuTap's `THIRD_PARTY_NOTICES.md` carries it forward.
 `HANDOFF.md` in the MuTap library repo is the authority on what gets built
 next. Status of this repo against it:
 
+- **The anti-howl safety layer landed in `mutap.afc~` as `@guard`** (MuTap's
+  `howl_guard`, phase 2 item 6b), one mic per object; not yet exercised in a
+  running Max either.
 - **M5 (this repo: scaffold + `mutap.afc~`) — code complete.** The external
   wraps the M4 processor (`pem_afc` with IPC gating and the transient freeze)
   and has **not yet been exercised in a running Max** — the help patcher's

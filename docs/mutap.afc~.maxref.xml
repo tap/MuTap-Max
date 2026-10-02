@@ -7,7 +7,7 @@
 <c74object name='mutap.afc~' category='audio,  adaptive,  feedback,  howling,  cleaning'>
 
 	<digest>Acoustic feedback (howling) canceller</digest>
-	<description>Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the loudspeaker-to-microphone feedback path from the microphone signal, adapted with PEM prewhitening so the closed loop does not bias the estimate (FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the signal feeding the loudspeaker; the cleaned output is delayed by @block samples. The middle outlet reports the IPC double-talk indicator (0..1); the right outlet reports two raw convergence statistics in dB (uncertainty_db shadow_ratio_db) for the patch to threshold. @warp selects the frequency-warped near-end model for music/tonal sources; @kalman selects the frequency-domain Kalman engine (v2); @shadow sizes the shadow comparator. </description>
+	<description>Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the loudspeaker-to-microphone feedback path from the microphone signal, adapted with PEM prewhitening so the closed loop does not bias the estimate (FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the signal feeding the loudspeaker; the cleaned output is delayed by @block samples. The second outlet carries the guard's post-reverb gain (1 with the guard off); the third reports the IPC double-talk indicator (0..1); the right outlet reports two raw convergence statistics in dB (uncertainty_db shadow_ratio_db), plus the guard's state with @guard on. @warp selects the frequency-warped near-end model for music/tonal sources; @kalman selects the frequency-domain Kalman engine (v2); @shadow sizes the shadow comparator; @guard adds the anti-howl safety layer (MuTap howl_guard: arming, duck, re-arm, back-off, soundcheck calibration, cap). </description>
 
 
 	<!--METADATA-->
@@ -37,7 +37,17 @@
 	<methodlist>
 		<method name='reset'>
 			<digest>Reset the canceller</digest>
-			<description>Reset the canceller: zero the learned feedback-path estimate. </description>
+			<description>Reset the canceller: zero the learned feedback-path estimate (and return the guard to ARMING). </description>
+		</method>
+
+		<method name='calibrate'>
+			<digest>Soundcheck: calibrate the guard's verdict thresholds</digest>
+			<description>Soundcheck: sample the convergence statistics for cal_s seconds, then run the guard on thresholds of median + margin (cal_margin_d for the shadow ratio, cal_margin_a for the uncertainty) and send 'calibrate_done d_db a_db' out of the right outlet. 'calibrate 0' ends it early. Needs the guard running (guard 1 with kalman 1 and shadow above 0); otherwise the object posts an error. The calibrated thresholds last until the next rebuild or until d_db or a_db is set. </description>
+		</method>
+
+		<method name='clear'>
+			<digest>Clear the guard's back-off</digest>
+			<description>Clear the guard's back-off: strikes 0, restore level 0 dB, latch released. </description>
 		</method>
 	</methodlist>
 
@@ -79,6 +89,61 @@
 		<attribute name='kalman' get='1' set='1' type='long' size='1' >
 			<digest>Frequency-domain Kalman engine (v2)</digest>
 			<description>Adaptive engine: off = the classic NLMS update (mu + gate), on = the frequency-domain Kalman filter (v2) — per-frequency state uncertainty and near-end tracking replace the step size, so mu is ignored and gate selects the burst floor instead (burst hardening at some added-stable-gain cost). The IPC outlet reports 0 with the Kalman engine (its gating is internal). Changing it rebuilds the canceller from scratch (the learned filter resets). </description>
+		</attribute>
+
+		<attribute name='guard' get='1' set='1' type='long' size='1' >
+			<digest>The anti-howl safety layer (MuTap howl_guard, one microphone)</digest>
+			<description>The anti-howl safety layer (MuTap howl_guard, one microphone): a gain policy over the canceller's convergence verdict and a howl detector on its residual, applied to the cleaned output. From every (re)build it holds the output arming dB down (ARMING) until the verdict (shadow_ratio_db below d_db AND uncertainty_db below a_db) has held hold seconds with the detector quiet, then opens; it ducks duck dB on a howl trip or a lost verdict, releases on the verdict or on a re-arm timer (rearm s x 2^strikes), lowers its restore level 3 dB per strike and latches after 3. After 10 s in ARMING without a verdict it reports unprotected, and opens only to cap if one is set. Needs kalman 1 and shadow above 0 (it reads both statistics): otherwise the object posts an error and runs unguarded. Default off: the object then behaves exactly as without it. With the guard on, the right outlet's list is uncertainty_db shadow_ratio_db guard_state gain_db unprotected strikes (guard_state one of arming, open, open_capped, ducked, releasing, latched), and the second (signal) outlet carries the guard's bus-stage gain: 1 except while ducked or releasing, where it is the duck relative to the restore level - multiply a reverb's output by it (*~) to cut a charged reverb too. Changing it rebuilds the canceller from scratch (the learned filter resets) and starts the guard in ARMING. </description>
+		</attribute>
+
+		<attribute name='cap' get='1' set='1' type='float64' size='1' >
+			<digest>The deployment gain cap in dB, or none</digest>
+			<description>The deployment gain cap in dB re the patch's operating gain (at most 0; MuTap's protocol sets the dry limit - 6 dB), or none (the default; send 'cap none'). It is the only way a guard opens without a verdict: after the 10 s ARMING timeout it opens to the cap (OPEN_CAPPED, unprotected); with no cap it stays ARMING, arming dB down, for as long as the verdict does not declare. Removing it re-arms a mic running on it. Applied live at the next vector. </description>
+		</attribute>
+
+		<attribute name='d_db' get='1' set='1' type='float64' size='1' >
+			<digest>The verdict's shadow-ratio threshold, dB</digest>
+			<description>The verdict's shadow-ratio threshold, dB (-120..120; MuTap's factory calibration -1.235): ok needs shadow_ratio_db below it. Setting it (or a_db) replaces a soundcheck calibration: the guard runs on the attribute values again. Applied live at the next vector. </description>
+		</attribute>
+
+		<attribute name='a_db' get='1' set='1' type='float64' size='1' >
+			<digest>The verdict's uncertainty threshold, dB</digest>
+			<description>The verdict's uncertainty threshold, dB (-300..120; MuTap's factory calibration -23.842): ok needs uncertainty_db below it. Setting it replaces a soundcheck calibration, as d_db does. Applied live at the next vector. </description>
+		</attribute>
+
+		<attribute name='duck' get='1' set='1' type='float64' size='1' >
+			<digest>How far a duck sits under the restore level, dB</digest>
+			<description>How far a duck sits under the restore level, dB (0..120, default 20). Applied live. </description>
+		</attribute>
+
+		<attribute name='hold' get='1' set='1' type='float64' size='1' >
+			<digest>The release hold, seconds</digest>
+			<description>The release hold, seconds (default 1.5): the verdict must hold ok this long, with the detector quiet, to declare (leave ARMING) or to release a duck. Applied live. </description>
+		</attribute>
+
+		<attribute name='arming' get='1' set='1' type='float64' size='1' >
+			<digest>ARMING's attenuation, dB</digest>
+			<description>ARMING's attenuation, dB (0..120, default 30; at least the cap's when one is set). Applied live. </description>
+		</attribute>
+
+		<attribute name='rearm' get='1' set='1' type='float64' size='1' >
+			<digest>The re-arm timer, seconds x 2^strikes</digest>
+			<description>A duck re-arms (releases) on a timer after this many seconds x 2^strikes with the detector quiet, when the verdict cannot recover (default 5). Applied live. </description>
+		</attribute>
+
+		<attribute name='cal_s' get='1' set='1' type='float64' size='1' >
+			<digest>The soundcheck window, seconds</digest>
+			<description>The soundcheck window, seconds (default 30, the protocol's track-through): 'calibrate' samples the statistics this long, then ends by itself. Read when a soundcheck begins. </description>
+		</attribute>
+
+		<attribute name='cal_margin_d' get='1' set='1' type='float64' size='1' >
+			<digest>The soundcheck's shadow-ratio margin, dB</digest>
+			<description>The soundcheck's shadow-ratio margin, dB (default 4, MuTap's measurement): the calibrated threshold is the window's median shadow_ratio_db plus this. Read when a soundcheck ends. </description>
+		</attribute>
+
+		<attribute name='cal_margin_a' get='1' set='1' type='float64' size='1' >
+			<digest>The soundcheck's uncertainty margin, dB</digest>
+			<description>The soundcheck's uncertainty margin, dB (default 3, MuTap's measurement): the calibrated threshold is the window's median uncertainty_db plus this. Read when a soundcheck ends. </description>
 		</attribute>
 
 	</attributelist>
