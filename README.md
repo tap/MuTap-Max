@@ -121,11 +121,22 @@ Early scaffold. Two objects so far:
   sees only its own residual. To repeat the library's bus stage over
   several mics, feed the reverb's output through `*~` by the `minimum~` of
   their gain outlets (the library takes the deepest duck among the mics).
-  The guard's howl detector keeps MuTap's defaults (a loop period of 10 ms,
-  a −6 dB re 1.0 ceiling on the residual's block RMS) except where the
-  geometry forces a change: its fit window spans at least 3 blocks (from
-  `@block` 512 at 48 kHz) and its top band stays under 0.45 × the sample
-  rate (below 35.6 kHz). The guard's measurements in MuTap are at block 64,
+  Two of the guard's howl-detector settings are deployment calibrations and
+  are attributes: `ceiling` (the absolute ceiling on the residual's block
+  RMS, dB re 1.0, −120..0, default −6, MuTap's: a block at or above it trips
+  in every state — set it with `cap` from the soundcheck's gain structure,
+  between the programme's peak and the limiter) and `loop_ms` (the loop
+  period the detector measures growth per pass against, 1–1000 ms, default
+  10, MuTap's: one trip round the loop — this object's `@block`, Max's I/O
+  buffers and the converters, plus the acoustic flight; at `@block` 256 in
+  Max the loop is longer than 10 ms, so set it from your patch's delay
+  budget). **They are detector configuration, which the guard cannot change
+  live: changing either while `@guard` is on rebuilds the canceller** (the
+  learned filter resets) and starts the guard in ARMING, like `@guard`
+  itself; set them before turning the guard on. The detector keeps MuTap's
+  defaults otherwise, except where the geometry forces a change: its fit
+  window spans at least 3 blocks (from `@block` 512 at 48 kHz) and its top
+  band stays under 0.45 × the sample rate (below 35.6 kHz). The guard's measurements in MuTap are at block 64,
   48 kHz, 1024 taps; this object defaults to block 256 and 2048 taps.
 
 - **`mutap.aec~`** — acoustic **echo** canceller: the open-loop cousin of

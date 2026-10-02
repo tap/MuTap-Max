@@ -210,6 +210,9 @@ SCENARIO("mutap.afc~ instantiates with the documented defaults") {
             REQUIRE(static_cast<double>(my_object.cal_margin_d) == factory.cal_d_margin_db);
             REQUIRE(static_cast<double>(my_object.cal_margin_a) == factory.cal_a_margin_db);
             REQUIRE_FALSE(factory.cap_db.has_value());
+            const tap::mu::howl_detector<double>::config detector;
+            REQUIRE(static_cast<double>(my_object.ceiling) == detector.ceiling_db);
+            REQUIRE(static_cast<double>(my_object.loop_ms) == Approx(detector.loop_period_s * 1e3));
             const atoms cap = my_object.cap;
             REQUIRE(cap.size() == 1);
             REQUIRE(name_of(cap[0]) == "none");
@@ -937,6 +940,109 @@ SCENARIO("mutap.afc~'s guard survives a sample-rate rebuild") {
             REQUIRE(reports.size() == 16);
             REQUIRE(name_of(reports[8][2]) == "arming");
             REQUIRE(value(reports[8][3]) == Approx(-30.0).margin(1e-9));
+        }
+    }
+}
+
+SCENARIO("mutap.afc~'s @ceiling and @loop_ms clamp and reach the guard's detector") {
+    ext_main(nullptr);
+
+    GIVEN("a default instance") {
+        test_wrapper<mutap_afc> an_instance;
+        mutap_afc&              my_object = an_instance;
+
+        WHEN("they are pushed past their ranges") {
+            my_object.ceiling      = 10.0;
+            const double too_high  = my_object.ceiling;
+            my_object.ceiling      = -500.0;
+            const double too_low   = my_object.ceiling;
+            my_object.loop_ms      = 0.0;
+            const double too_short = my_object.loop_ms;
+            my_object.loop_ms      = 5000.0;
+            const double too_long  = my_object.loop_ms;
+            THEN("the ceiling clamps to [-120, 0] dB re 1.0 and the loop period to [1, 1000] ms") {
+                REQUIRE(too_high == 0.0);
+                REQUIRE(too_low == -120.0);
+                REQUIRE(too_short == 1.0);
+                REQUIRE(too_long == 1000.0);
+            }
+        }
+        WHEN("the guard is built on the Kalman core with the defaults") {
+            my_object.kalman = true;
+            my_object.guard  = true;
+            const auto built = my_object.built_detector();
+            THEN("its detector runs on -6 dB and 10 ms") {
+                REQUIRE(my_object.built_guard());
+                REQUIRE(built.first == -6.0);
+                REQUIRE(built.second == Approx(10.0).epsilon(1e-12));
+            }
+            AND_WHEN("@ceiling -20 and @loop_ms 30 follow") {
+                my_object.ceiling  = -20.0;
+                my_object.loop_ms  = 30.0;
+                const auto rebuilt = my_object.built_detector();
+                THEN("the rebuilt guard's detector runs on them") {
+                    REQUIRE(rebuilt.first == -20.0);
+                    REQUIRE(rebuilt.second == Approx(30.0).epsilon(1e-12));
+                }
+            }
+        }
+        WHEN("they are set before the guard is turned on") {
+            my_object.ceiling = -12.0;
+            my_object.loop_ms = 25.0;
+            my_object.kalman  = true;
+            my_object.guard   = true;
+            const auto built  = my_object.built_detector();
+            THEN("the guard is built with them") {
+                REQUIRE(built.first == -12.0);
+                REQUIRE(built.second == Approx(25.0).epsilon(1e-12));
+            }
+        }
+    }
+}
+
+SCENARIO("mutap.afc~'s @ceiling decides whether a steady near-end tone trips the guard") {
+    ext_main(nullptr);
+
+    // A 1 kHz near-end tone of amplitude 0.2 (-17 dB re 1.0 RMS on the
+    // residual) from the start, @cap -12, 12 s: under the default -6 dB
+    // ceiling it is a steady programme and never trips; under @ceiling -20
+    // every block trips, the detector is never quiet, and the guard stays in
+    // ARMING collecting strikes.
+    GIVEN("@kalman 1 @guard 1 @cap -12 and a steady tone, at the default ceiling and at @ceiling -20") {
+        const long           samples       = seconds_of(12.0);
+        const size_t         count         = reports_in(samples);
+        static const run_log k_default_log = run_logged(count, count, [=](mutap_afc& my_object, room& the_room) {
+            my_object.kalman = true;
+            my_object.guard  = true;
+            my_object.cap    = atoms{-12.0};
+            the_room.tone    = 0.2;
+            the_room.drive(my_object, samples);
+        });
+        static const run_log k_low_log     = run_logged(count, count, [=](mutap_afc& my_object, room& the_room) {
+            my_object.kalman  = true;
+            my_object.guard   = true;
+            my_object.cap     = atoms{-12.0};
+            my_object.ceiling = -20.0;
+            the_room.tone     = 0.2;
+            the_room.drive(my_object, samples);
+        });
+        const auto           at_default    = guard_reports(k_default_log.reports);
+        const auto           at_low        = guard_reports(k_low_log.reports);
+
+        THEN("at the default ceiling the tone never trips; at -20 dB it trips from the first report on") {
+            REQUIRE(at_default.size() == count);
+            REQUIRE(at_low.size() == count);
+            // Measured: at -6 dB, 0 strikes in all 258 reports; the guard
+            // leaves ARMING (open at report 50 - the tone moves the statistics
+            // under the verdict's thresholds - then a lost-verdict duck and a
+            // release, no strike). At -20 dB, ARMING in every report with 8
+            // strikes at report 0 and 30 (the strike counter's cap) from 25 on.
+            REQUIRE(
+                std::all_of(at_default.begin(), at_default.end(), [](const auto& r) { return value(r[5]) == 0.0; }));
+            REQUIRE(std::any_of(at_default.begin(), at_default.end(),
+                                [](const auto& r) { return name_of(r[2]) != "arming"; }));
+            REQUIRE(std::all_of(at_low.begin(), at_low.end(),
+                                [](const auto& r) { return name_of(r[2]) == "arming" && value(r[5]) >= 1.0; }));
         }
     }
 }

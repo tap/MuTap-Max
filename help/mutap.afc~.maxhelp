@@ -1385,10 +1385,10 @@
          "patching_rect": [
           40.0,
           200.0,
-          220.0,
+          280.0,
           22.0
          ],
-         "text": "mutap.afc~ 2048 @kalman 1 @guard 1",
+         "text": "mutap.afc~ 2048 @kalman 1 @loop_ms 35 @guard 1",
          "outlettype": [
           "signal",
           "signal",
@@ -2207,6 +2207,92 @@
          ],
          "text": "guard_state: arming (held @arming dB down until the verdict declares), open (0 dB, less 3 dB per strike), open_capped (no verdict yet: at the cap, unprotected), ducked (@duck dB under the restore level, on a howl trip or a lost verdict), releasing (ramping back up), latched (three strikes: at the floor, unprotected). gain_db is the gain at the end of the last block; a duck releases on the verdict or after @rearm s x 2^strikes. reset returns to arming; so does every rebuild."
         }
+       },
+       {
+        "box": {
+         "id": "obj-52",
+         "maxclass": "comment",
+         "numinlets": 1,
+         "numoutlets": 0,
+         "patching_rect": [
+          300.0,
+          100.0,
+          290.0,
+          20.0
+         ],
+         "text": "0. The detector's calibrations",
+         "fontface": 1
+        }
+       },
+       {
+        "box": {
+         "id": "obj-53",
+         "maxclass": "message",
+         "numinlets": 2,
+         "numoutlets": 1,
+         "patching_rect": [
+          300.0,
+          124.0,
+          70.0,
+          22.0
+         ],
+         "text": "loop_ms 35",
+         "outlettype": [
+          ""
+         ]
+        }
+       },
+       {
+        "box": {
+         "id": "obj-54",
+         "maxclass": "flonum",
+         "numinlets": 1,
+         "numoutlets": 2,
+         "patching_rect": [
+          380.0,
+          124.0,
+          50.0,
+          22.0
+         ],
+         "outlettype": [
+          "",
+          "bang"
+         ],
+         "maximum": 0.0
+        }
+       },
+       {
+        "box": {
+         "id": "obj-55",
+         "maxclass": "message",
+         "numinlets": 2,
+         "numoutlets": 1,
+         "patching_rect": [
+          436.0,
+          124.0,
+          70.0,
+          22.0
+         ],
+         "text": "ceiling $1",
+         "outlettype": [
+          ""
+         ]
+        }
+       },
+       {
+        "box": {
+         "id": "obj-56",
+         "maxclass": "comment",
+         "numinlets": 1,
+         "numoutlets": 0,
+         "patching_rect": [
+          300.0,
+          148.0,
+          290.0,
+          48.0
+         ],
+         "text": "loop_ms = one trip round YOUR loop: @block + Max's I/O vector in and out + converters + flight (48 kHz, @block 256, I/O 512, 3 m: about 35 ms). ceiling: dB re 1.0 on the residual, set with the cap. Each rebuilds the canceller: set them before guard 1."
+        }
        }
       ],
       "lines": [
@@ -2699,6 +2785,42 @@
          "source": [
           "obj-47",
           1
+         ]
+        }
+       },
+       {
+        "patchline": {
+         "destination": [
+          "obj-4",
+          0
+         ],
+         "source": [
+          "obj-53",
+          0
+         ]
+        }
+       },
+       {
+        "patchline": {
+         "destination": [
+          "obj-4",
+          0
+         ],
+         "source": [
+          "obj-55",
+          0
+         ]
+        }
+       },
+       {
+        "patchline": {
+         "destination": [
+          "obj-55",
+          0
+         ],
+         "source": [
+          "obj-54",
+          0
          ]
         }
        }

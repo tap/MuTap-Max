@@ -76,6 +76,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -159,19 +160,23 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     // the scheduler thread; the mutex serializes them — the audio thread
     // never takes it).
     mutable std::mutex m_control_mutex;
-    long               m_filter_length{2048}; ///< requested filter length, samples (creation arg)
-    long               m_block_size{256};     ///< requested canceller block size, samples
-    bool               m_gate{true};          ///< IPC/transient robustness layer on rebuilds
-    bool               m_warp{false};         ///< frequency-warped (music) near-end model on rebuilds
-    bool               m_kalman{false};       ///< frequency-domain Kalman core (v2) on rebuilds
-    long               m_shadow{2};           ///< requested shadow-comparator partitions (0 = off) on rebuilds
-    double             m_engine_sr{0.0};      ///< sample rate the last built engine was scaled for (0 = none)
-    size_t             m_engine_shadow{0};    ///< shadow partitions the last built engine was configured with
-    bool               m_guard{false};        ///< @guard requested (it runs only with @kalman 1 and @shadow > 0)
-    bool               m_engine_guard{false}; ///< the last built engine carries a guard
-    bool               m_dsp_seen{false};     ///< dspsetup ran: refusals of @guard are posted from here on
-    guard_policy       m_policy;              ///< the guard's policy as the attributes set it
-    bool               m_constructed{false};  ///< guards publish() until the constructor body ran
+    long               m_filter_length{2048};    ///< requested filter length, samples (creation arg)
+    long               m_block_size{256};        ///< requested canceller block size, samples
+    bool               m_gate{true};             ///< IPC/transient robustness layer on rebuilds
+    bool               m_warp{false};            ///< frequency-warped (music) near-end model on rebuilds
+    bool               m_kalman{false};          ///< frequency-domain Kalman core (v2) on rebuilds
+    long               m_shadow{2};              ///< requested shadow-comparator partitions (0 = off) on rebuilds
+    double             m_engine_sr{0.0};         ///< sample rate the last built engine was scaled for (0 = none)
+    size_t             m_engine_shadow{0};       ///< shadow partitions the last built engine was configured with
+    bool               m_guard{false};           ///< @guard requested (it runs only with @kalman 1 and @shadow > 0)
+    bool               m_engine_guard{false};    ///< the last built engine carries a guard
+    double             m_ceiling_db{-6.0};       ///< @ceiling: the guard's detector ceiling, dB re 1.0, on rebuilds
+    double             m_loop_ms{10.0};          ///< @loop_ms: the guard's detector loop period, ms, on rebuilds
+    double             m_engine_ceiling_db{0.0}; ///< the ceiling the last built guard's detector runs on
+    double             m_engine_loop_ms{0.0};    ///< the loop period the last built guard's detector runs on
+    bool               m_dsp_seen{false};        ///< dspsetup ran: refusals of @guard are posted from here on
+    guard_policy       m_policy;                 ///< the guard's policy as the attributes set it
+    bool               m_constructed{false};     ///< guards publish() until the constructor body ran
 
     // Scalar controls applied by the audio thread every vector (no rebuild).
     std::atomic<double>              m_mu{0.5};
@@ -395,6 +400,48 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
             return {value};
         }}};
 
+    attribute<number> ceiling{
+        this, "ceiling", -6.0,
+        description{"The guard's absolute howl ceiling: block RMS of the canceller's residual, dB re 1.0 (-120..0, "
+                    "default -6, MuTap's). A block at or above it trips the guard in every state. A deployment "
+                    "calibration, set with @cap from the soundcheck's gain structure: between the programme's peak "
+                    "and the limiter. It is detector configuration, which the guard cannot change live: changing it "
+                    "while @guard is on rebuilds the canceller from scratch (the learned filter resets) and starts "
+                    "the guard in ARMING."},
+        setter{MIN_FUNCTION{
+            const double                requested = args[0];
+            std::lock_guard<std::mutex> lock(m_control_mutex);
+            if (std::isfinite(requested)) {
+                m_ceiling_db = std::clamp(requested, -120.0, 0.0);
+            }
+            if (m_constructed && m_guard) {
+                publish();
+            }
+            return {m_ceiling_db};
+        }}};
+
+    attribute<number> loop_ms{
+        this, "loop_ms", 10.0,
+        description{"The guard's loop period, ms (1..1000, default 10, MuTap's): one trip round the feedback loop - "
+                    "this object's @block, the host's I/O buffers and converters, and the acoustic flight from "
+                    "speaker to mic. The howl detector measures growth per loop pass, so set it from the patch's "
+                    "delay budget: at @block 256 in Max the loop is longer than 10 ms (at 48 kHz: @block 256 is "
+                    "5.3 ms, an I/O vector of 512 in and out 21.3 ms, 3 m of flight 8.7 ms - about 35 ms; measure "
+                    "your interface's round trip to be sure). It is detector "
+                    "configuration, which the guard cannot change live: changing it while @guard is on rebuilds the "
+                    "canceller from scratch (the learned filter resets) and starts the guard in ARMING."},
+        setter{MIN_FUNCTION{
+            const double                requested = args[0];
+            std::lock_guard<std::mutex> lock(m_control_mutex);
+            if (std::isfinite(requested)) {
+                m_loop_ms = std::clamp(requested, 1.0, 1000.0);
+            }
+            if (m_constructed && m_guard) {
+                publish();
+            }
+            return {m_loop_ms};
+        }}};
+
     attribute<numbers> cap{
         this, "cap", numbers{},
         description{"The deployment gain cap in dB re the patch's operating gain (at most 0; MuTap's protocol sets "
@@ -567,6 +614,15 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     bool built_guard() const {
         std::lock_guard<std::mutex> lock(m_control_mutex);
         return m_engine_guard;
+    }
+
+    /// The detector ceiling (dB re 1.0) and loop period (ms) the most
+    /// recently built guard runs on, read back from its detector at build
+    /// time (0 before any guard was built). Control-side state; the unit
+    /// tests use it.
+    std::pair<double, double> built_detector() const {
+        std::lock_guard<std::mutex> lock(m_control_mutex);
+        return {m_engine_ceiling_db, m_engine_loop_ms};
     }
 
     void operator()(audio_bundle input, audio_bundle output) {
@@ -800,7 +856,8 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     }
 
     /// The guard's configuration for one engine: one microphone at the
-    /// canceller's block and the DSP rate, the attributes' policy, and the
+    /// canceller's block and the DSP rate, the attributes' policy, the
+    /// detector's two deployment calibrations (@ceiling, @loop_ms), and the
     /// two detector fields the geometry forces (MuTap's defaults otherwise):
     /// the band range under k_detector_top x fs, and the growth fit spanning
     /// at least the 3 blocks howl_detector requires (its 21.3 ms default holds
@@ -811,6 +868,8 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
         cfg.block_size               = block;
         cfg.sample_rate              = sample_rate;
         cfg.policy                   = m_policy;
+        cfg.detector.ceiling_db      = m_ceiling_db;
+        cfg.detector.loop_period_s   = m_loop_ms * 1e-3;
         cfg.detector.f_hi_hz         = std::min(cfg.detector.f_hi_hz, k_detector_top * sample_rate);
         const double three_blocks    = 3.0 * static_cast<double>(block) / sample_rate * (1.0 + 1e-9);
         cfg.detector.growth_window_s = std::max(cfg.detector.growth_window_s, three_blocks);
@@ -901,6 +960,10 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
             const bool guarded = m_guard && guard_supported();
             if (guarded) {
                 eng->guard.emplace(make_guard_config(static_cast<size_t>(m_block_size), sr));
+                // Read back before the hand-over: the audio thread owns it after.
+                const auto& detector = eng->guard->detector(0).cfg();
+                m_engine_ceiling_db  = detector.ceiling_db;
+                m_engine_loop_ms     = detector.loop_period_s * 1e3;
             }
             else if (m_guard && m_dsp_seen) {
                 post_guard_refusal();
