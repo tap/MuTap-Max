@@ -16,49 +16,72 @@
 ///
 /// Signal inlet 0 is the microphone signal y; signal inlet 1 is the
 /// loudspeaker/reference signal u (the signal the patch sends to the
-/// speaker). Signal outlet 0 is the cleaned signal e = y - F_hat u; outlet 1
-/// reports the IPC double-talk indicator (0..1, low = near-end speech
-/// dominates, high = feedback dominates) every few processed blocks; the
-/// rightmost outlet reports two raw convergence statistics on the same
-/// cadence, as the list `uncertainty_db shadow_ratio_db`: the Kalman core's
-/// identification progress (pem_afc::uncertainty_ratio(); 0 dB with the NLMS
-/// core, which has none) and the @shadow comparator's residual power ratio
+/// speaker). Signal outlet 0 is the cleaned signal e = y - F_hat u (times the
+/// guard's gain with @guard on); signal outlet 1 is the guard's post-reverb
+/// (bus-stage) gain, linear (1 with the guard off); outlet 2 reports the IPC
+/// double-talk indicator (0..1, low = near-end speech dominates, high =
+/// feedback dominates) every few processed blocks; the rightmost outlet
+/// reports two raw convergence statistics on the same cadence, as the list
+/// `uncertainty_db shadow_ratio_db`: the Kalman core's identification
+/// progress (pem_afc::uncertainty_ratio(); 0 dB with the NLMS core, which has
+/// none) and the @shadow comparator's residual power ratio
 /// (pem_afc::shadow_residual_ratio(); 0 dB with @shadow 0). MuTap's
 /// pem_afc.h and fd_kalman.h record what each was measured to catch and
-/// miss; the external applies no threshold — that is the patch's policy.
+/// miss; without the guard the external applies no threshold — that is the
+/// patch's policy.
+///
+/// @guard 1 adds MuTap's safety layer for this one microphone: a
+/// tap::mu::howl_guard<double> (microphones = 1) built with the canceller,
+/// fed every processed block with the canceller's residual e and its two
+/// statistics, whose per-mic gain is applied to signal outlet 0 — the
+/// single-mic equivalent of afc_chain::set_guard() (include/mutap/howl_guard.h
+/// and afc_chain.h in MuTap; docs/howl-guard.md has the measurements). It
+/// needs both statistics, as afc_chain does: @kalman 1 and @shadow > 0;
+/// otherwise the object posts an error and runs unguarded. With the guard on
+/// the rightmost list grows to `uncertainty_db shadow_ratio_db guard_state
+/// gain_db unprotected strikes`, and a soundcheck (`calibrate`) ends with
+/// `calibrate_done d_db a_db` on the same outlet. The guard's policy
+/// attributes are copied into a pending slot and applied by the audio thread
+/// at the top of the next vector; the main thread never touches a live guard.
 ///
 /// The canceller works on fixed blocks of @block samples, independent of the
 /// host signal vector size: the perform routine gathers samples into
 /// constructor-allocated block buffers, calls process_block() every time a
 /// block fills, and plays the processed block back out — adding exactly
-/// @block samples of latency on the cleaned output. The perform path is
-/// allocation-free (mutap's real-time contract: everything after
-/// construction is noexcept and allocation-free).
+/// @block samples of latency on the cleaned output (the gain outlet is
+/// aligned with it). The perform path is allocation-free (mutap's real-time
+/// contract: everything after construction is noexcept and allocation-free).
 ///
 /// Threading follows the ambitap.xtc~ pattern: attribute setters run on the
-/// control thread, where structural changes (@block, @gate, the filter-length
-/// creation arg) rebuild the canceller and publish it through a lock-free
-/// single-slot handoff; the audio thread adopts the new canceller at a vector
-/// boundary and parks the old one in a trash slot that the control thread
-/// reaps — the audio thread never allocates or frees. Scalar controls (@mu,
-/// @adapt, reset) travel through atomics and are applied on the audio thread.
-/// The shadow comparator's smoothing is a per-block retention, so it is
-/// scaled for the block size and the DSP sample rate at every rebuild, and
-/// a sample-rate change (dspsetup) rebuilds while @shadow is on.
+/// control thread, where structural changes (@block, @gate, @guard, the
+/// filter-length creation arg) rebuild the canceller (and the guard) and
+/// publish it through a lock-free single-slot handoff; the audio thread
+/// adopts the new engine at a vector boundary and parks the old one in a
+/// trash slot that the control thread reaps — the audio thread never
+/// allocates or frees. Scalar controls (@mu, @adapt, reset, the guard's
+/// policy, calibrate, clear) travel through atomics or the policy slot and
+/// are applied on the audio thread. The shadow comparator's smoothing is a
+/// per-block retention, so it is scaled for the block size and the DSP sample
+/// rate at every rebuild, and a sample-rate change (dspsetup) rebuilds while
+/// @shadow is on (always, with the guard running).
 // SPDX-License-Identifier: MIT
 // Copyright 2026 MuTap contributors
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <thread>
 #include <variant>
 #include <vector>
 
 #include "c74_min.h"
 #include "mutap/fd_kalman.h"
+#include "mutap/howl_guard.h"
 #include "mutap/pem_afc.h"
 
 using namespace c74::min;
@@ -70,26 +93,44 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
         tap::mu::pem_afc<double, tap::mu::speech_predictor<double>, tap::mu::partitioned_fdkf<double>>;
     using kalman_warped_afc =
         tap::mu::pem_afc<double, tap::mu::warped_lpc_predictor<double>, tap::mu::partitioned_fdkf<double>>;
+    using guard_type   = tap::mu::howl_guard<double>;
+    using guard_policy = tap::mu::guard_policy;
 
     /// One canceller plus its vector-size bridging buffers, all sized for one
-    /// block. Built on the control thread; used (and only used) on the audio
-    /// thread after ownership is handed over. The variant selects the
-    /// near-end model (@warp); the audio thread dispatches with std::visit,
-    /// which never allocates.
+    /// block, and the optional guard (@guard) at the same block size. Built on
+    /// the control thread; used (and only used) on the audio thread after
+    /// ownership is handed over. The variant selects the near-end model
+    /// (@warp); the audio thread dispatches with std::visit, which never
+    /// allocates. The guard is never moved (it points into itself), so it is
+    /// emplaced in place and the engine lives behind a pointer.
     struct engine {
         std::variant<speech_afc, warped_afc, kalman_speech_afc, kalman_warped_afc> afc;
-        std::vector<double> u_block; ///< gathering reference (loudspeaker) samples
-        std::vector<double> y_block; ///< gathering microphone samples
-        std::vector<double> e_block; ///< last processed block, being played out
-        size_t              fill{0}; ///< samples gathered so far, == play-out position
+        std::vector<double>       u_block;            ///< gathering reference (loudspeaker) samples
+        std::vector<double>       y_block;            ///< gathering microphone samples
+        std::vector<double>       e_block;            ///< last processed block (guarded), being played out
+        std::vector<double>       g_block;            ///< its bus-stage gain, being played out (1 without a guard)
+        std::optional<guard_type> guard;              ///< the safety layer, when @guard is on and supported
+        size_t                    fill{0};            ///< samples gathered so far, == play-out position
+        bool                      calibrating{false}; ///< a soundcheck is running (audio thread)
 
         template <typename Afc>
         explicit engine(std::in_place_type_t<Afc> which, const typename Afc::config& cfg)
             : afc(which, cfg)
             , u_block(cfg.fdaf.block_size, 0.0)
             , y_block(cfg.fdaf.block_size, 0.0)
-            , e_block(cfg.fdaf.block_size, 0.0) {}
+            , e_block(cfg.fdaf.block_size, 0.0)
+            , g_block(cfg.fdaf.block_size, 1.0) {}
     };
+
+    /// The guard's policy on its way to the audio thread, and whether the
+    /// verdict thresholds (@d_db, @a_db) changed since the last hand-over.
+    struct policy_update {
+        guard_policy policy;
+        bool         thresholds{false};
+    };
+
+    /// calibrate requests, control -> audio.
+    enum class calibration_request : int { none, begin, end };
 
     static constexpr long k_min_block         = 16;
     static constexpr long k_max_block         = 4096;
@@ -104,6 +145,10 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     static constexpr double k_shadow_tau_s = 0.051;
     /// Floor of the linear statistics before the dB conversion (-120 dB).
     static constexpr double k_stat_floor = 1e-12;
+    /// The guard's howl detector keeps its band range under this fraction of
+    /// the sample rate (its default top band, 16 kHz, must stay below
+    /// Nyquist: below 35.6 kHz it is lowered to 0.45 fs).
+    static constexpr double k_detector_top = 0.45;
 
     // State lives ABOVE the attributes on purpose: min-api attribute
     // construction invokes the custom setter with the default value, and
@@ -122,27 +167,48 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     long               m_shadow{2};           ///< requested shadow-comparator partitions (0 = off) on rebuilds
     double             m_engine_sr{0.0};      ///< sample rate the last built engine was scaled for (0 = none)
     size_t             m_engine_shadow{0};    ///< shadow partitions the last built engine was configured with
+    bool               m_guard{false};        ///< @guard requested (it runs only with @kalman 1 and @shadow > 0)
+    bool               m_engine_guard{false}; ///< the last built engine carries a guard
+    bool               m_dsp_seen{false};     ///< dspsetup ran: refusals of @guard are posted from here on
+    guard_policy       m_policy;              ///< the guard's policy as the attributes set it
     bool               m_constructed{false};  ///< guards publish() until the constructor body ran
 
     // Scalar controls applied by the audio thread every vector (no rebuild).
-    std::atomic<double> m_mu{0.5};
-    std::atomic<bool>   m_adapt{true};
-    std::atomic<bool>   m_reset_request{false};
+    std::atomic<double>              m_mu{0.5};
+    std::atomic<bool>                m_adapt{true};
+    std::atomic<bool>                m_reset_request{false};
+    std::atomic<bool>                m_clear_request{false};
+    std::atomic<calibration_request> m_calibration_request{calibration_request::none};
+
+    // The guard's policy, control -> audio: the control thread writes the
+    // slot under the spin flag and raises m_policy_dirty; the audio thread
+    // only TRIES the flag (a busy flag defers the update to the next vector),
+    // so it never waits on the control thread.
+    policy_update     m_policy_slot;
+    std::atomic<bool> m_policy_dirty{false};
+    std::atomic_flag  m_policy_busy = ATOMIC_FLAG_INIT;
 
     // Control -> audio handoff (freshly built engine awaiting adoption) and
     // audio -> control return path (retired engine awaiting deletion).
     std::atomic<engine*> m_pending{nullptr};
     std::atomic<engine*> m_trash{nullptr};
 
-    // Audio-thread-only state. m_ipc_atoms and m_conv_atoms are
-    // pre-allocated because the queue-backed outlet's scalar send() does not
-    // compile in this min-api pin (its unsafe-send path pushes the raw scalar
-    // where atoms& is expected); sending an atoms lvalue takes the path that
-    // does. The queue copy inside min-api is the same cost min.edge~ pays.
-    engine* m_active{nullptr};
-    long    m_report_countdown{k_ipc_report_blocks};
-    atoms   m_ipc_atoms{0.0};
-    atoms   m_conv_atoms{0.0, 0.0}; ///< uncertainty_db, shadow_ratio_db
+    // Audio-thread-only state. The atoms are pre-allocated because the
+    // queue-backed outlet's scalar send() does not compile in this min-api
+    // pin (its unsafe-send path pushes the raw scalar where atoms& is
+    // expected); sending an atoms lvalue takes the path that does. The queue
+    // copy inside min-api is the same cost min.edge~ pays. The symbols are
+    // made here, on the constructing thread, so the audio thread only copies
+    // pointers.
+    engine*               m_active{nullptr};
+    long                  m_report_countdown{k_ipc_report_blocks};
+    atoms                 m_ipc_atoms{0.0};
+    atoms                 m_conv_atoms{0.0, 0.0}; ///< uncertainty_db, shadow_ratio_db
+    std::array<symbol, 6> m_state_names{symbol{"arming"}, symbol{"open"},      symbol{"open_capped"},
+                                        symbol{"ducked"}, symbol{"releasing"}, symbol{"latched"}};
+    /// uncertainty_db shadow_ratio_db guard_state gain_db unprotected strikes
+    atoms m_guard_atoms{0.0, 0.0, symbol{"arming"}, 0.0, 0, 0};
+    atoms m_calibrated_atoms{symbol{"calibrate_done"}, 0.0, 0.0}; ///< calibrate_done d_db a_db
 
   public:
     MIN_DESCRIPTION{"Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the "
@@ -150,21 +216,25 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
                     "with PEM prewhitening so the closed loop does not bias the estimate "
                     "(FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the "
                     "signal feeding the loudspeaker; the cleaned output is delayed by @block samples. "
-                    "The middle outlet reports the IPC double-talk indicator (0..1); the right outlet "
-                    "reports two raw convergence statistics in dB (uncertainty_db shadow_ratio_db) "
-                    "for the patch to threshold. @warp selects the frequency-warped near-end model "
-                    "for music/tonal sources; @kalman selects the frequency-domain Kalman engine "
-                    "(v2); @shadow sizes the shadow comparator."};
+                    "The second outlet carries the guard's post-reverb gain (1 with the guard off); the "
+                    "third reports the IPC double-talk indicator (0..1); the right outlet reports two raw "
+                    "convergence statistics in dB (uncertainty_db shadow_ratio_db), plus the guard's "
+                    "state with @guard on. @warp selects the frequency-warped near-end model for "
+                    "music/tonal sources; @kalman selects the frequency-domain Kalman engine (v2); "
+                    "@shadow sizes the shadow comparator; @guard adds the anti-howl safety layer "
+                    "(MuTap howl_guard: arming, duck, re-arm, back-off, soundcheck calibration, cap)."};
     MIN_TAGS{"audio, adaptive, feedback, howling, cleaning"};
     MIN_AUTHOR{"MuTap contributors"};
     MIN_RELATED{"adc~, dac~, adoutput~"};
 
     inlet<>  m_in_mic{this, "(signal) microphone signal y"};
     inlet<>  m_in_ref{this, "(signal) loudspeaker / reference signal u"};
-    outlet<> m_out{this, "(signal) cleaned signal e = y - estimated feedback", "signal"};
+    outlet<> m_out{this, "(signal) cleaned signal e = y - estimated feedback (times the guard's gain)", "signal"};
+    outlet<> m_gain_out{this, "(signal) the guard's post-reverb (bus-stage) gain, linear; 1 with the guard off",
+                        "signal"};
     outlet<thread_check::scheduler, thread_action::fifo> m_ipc_out{this, "(float) IPC double-talk indicator, 0..1"};
     outlet<thread_check::scheduler, thread_action::fifo> m_conv_out{
-        this, "(list) convergence statistics: uncertainty_db shadow_ratio_db"};
+        this, "(list) uncertainty_db shadow_ratio_db [guard_state gain_db unprotected strikes]; calibrate_done"};
 
     /// First creation argument is the feedback-path filter length in samples
     /// (default 2048); partitions = ceil(filter_length / block size).
@@ -295,23 +365,191 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
             return {static_cast<int>(m_shadow)};
         }}};
 
-    /// Zero the learned filter and the block buffers (applied on the audio
-    /// thread at the next vector, so it does not race the perform routine).
-    message<> reset{this, "reset", "Reset the canceller: zero the learned feedback-path estimate.",
+    // ------------------------------------------------------------ the guard
+
+    attribute<bool> guard{
+        this, "guard", false,
+        description{"The anti-howl safety layer (MuTap howl_guard, one microphone): a gain policy over the "
+                    "canceller's convergence verdict and a howl detector on its residual, applied to the cleaned "
+                    "output. From every (re)build it holds the output @arming dB down (ARMING) until the verdict "
+                    "(shadow_ratio_db < @d_db AND uncertainty_db < @a_db) has held @hold seconds with the detector "
+                    "quiet, then opens; it ducks @duck dB on a howl trip or a lost verdict, releases on the "
+                    "verdict or on a re-arm timer (@rearm s x 2^strikes), lowers its restore level 3 dB per strike "
+                    "and latches after 3. After 10 s in ARMING without a verdict it reports unprotected, and opens "
+                    "only to @cap if one is set. Needs @kalman 1 and @shadow > 0 (it reads both statistics): "
+                    "otherwise the object posts an error and runs unguarded. Default off: the object then behaves "
+                    "exactly as without it. With the guard on, the right outlet's list is uncertainty_db "
+                    "shadow_ratio_db guard_state gain_db unprotected strikes (guard_state one of arming, open, "
+                    "open_capped, ducked, releasing, latched), and the second (signal) outlet carries the guard's "
+                    "bus-stage gain: 1 except while ducked or releasing, where it is the duck relative to the "
+                    "restore level - multiply a reverb's output by it (*~) to cut a charged reverb too. Changing "
+                    "it rebuilds the canceller from scratch (the learned filter resets) and starts the guard in "
+                    "ARMING."},
+        setter{MIN_FUNCTION{
+            const bool                  value = args[0];
+            std::lock_guard<std::mutex> lock(m_control_mutex);
+            m_guard = value;
+            if (m_constructed) {
+                publish();
+            }
+            return {value};
+        }}};
+
+    attribute<numbers> cap{
+        this, "cap", numbers{},
+        description{"The deployment gain cap in dB re the patch's operating gain (at most 0; MuTap's protocol sets "
+                    "the dry limit - 6 dB), or none (the default; send 'cap none'). It is the only way a guard "
+                    "opens without a verdict: after the 10 s ARMING timeout it opens to the cap (OPEN_CAPPED, "
+                    "unprotected); with no cap it stays ARMING, @arming dB down, for as long as the verdict does "
+                    "not declare. Removing it re-arms a mic running on it. Applied live at the next vector."},
+        setter{MIN_FUNCTION{
+            std::lock_guard<std::mutex> lock(m_control_mutex);
+            if (args.empty() || args[0].type() == message_type::symbol_argument) {
+                m_policy.cap_db.reset();
+            }
+            else if (const double value = args[0]; std::isfinite(value)) {
+                m_policy.cap_db = std::clamp(value, -120.0, 0.0);
+            }
+            push_policy(false);
+            return m_policy.cap_db ? atoms{*m_policy.cap_db} : atoms{};
+        }},
+        // MIN_GETTER_FUNCTION spelled out: clang-format cannot see the lambda
+        // through the macro.
+        getter{[this]() -> atoms {
+            std::lock_guard<std::mutex> lock(m_control_mutex);
+            return m_policy.cap_db ? atoms{*m_policy.cap_db} : atoms{symbol{"none"}};
+        }}};
+
+    attribute<number> d_db{
+        this, "d_db", -1.235,
+        description{"The verdict's shadow-ratio threshold, dB (-120..120; MuTap's factory calibration -1.235): "
+                    "ok needs shadow_ratio_db below it. Setting it (or @a_db) replaces a soundcheck calibration: "
+                    "the guard runs on the attribute values again. Applied live at the next vector."},
+        setter{MIN_FUNCTION{
+            return {set_policy_field(&guard_policy::d_db, args[0], -120.0, 120.0, true)};
+        }}};
+
+    attribute<number> a_db{
+        this, "a_db", -23.842,
+        description{"The verdict's uncertainty threshold, dB (-300..120; MuTap's factory calibration -23.842): ok "
+                    "needs uncertainty_db below it. Setting it replaces a soundcheck calibration, as @d_db does. "
+                    "Applied live at the next vector."},
+        setter{MIN_FUNCTION{
+            return {set_policy_field(&guard_policy::a_db, args[0], -300.0, 120.0, true)};
+        }}};
+
+    attribute<number> duck{
+        this, "duck", 20.0,
+        description{"How far a duck sits under the restore level, dB (0..120, default 20). Applied live."},
+        setter{MIN_FUNCTION{
+            return {set_policy_field(&guard_policy::duck_db, args[0], 0.0, 120.0, false)};
+        }}};
+
+    attribute<number> hold{
+        this, "hold", 1.5,
+        description{"The release hold, seconds (default 1.5): the verdict must hold ok this long, with the detector "
+                    "quiet, to declare (leave ARMING) or to release a duck. Applied live."},
+        setter{MIN_FUNCTION{
+            return {set_policy_field(&guard_policy::release_hold_s, args[0], 0.0, k_max_seconds, false)};
+        }}};
+
+    attribute<number> arming{
+        this, "arming", 30.0,
+        description{"ARMING's attenuation, dB (0..120, default 30; at least the cap's when one is set). Applied "
+                    "live."},
+        setter{MIN_FUNCTION{
+            return {set_policy_field(&guard_policy::arming_duck_db, args[0], 0.0, 120.0, false)};
+        }}};
+
+    attribute<number> rearm{
+        this, "rearm", 5.0,
+        description{"A duck re-arms (releases) on a timer after this many seconds x 2^strikes with the detector "
+                    "quiet, when the verdict cannot recover (default 5). Applied live."},
+        setter{MIN_FUNCTION{
+            return {set_policy_field(&guard_policy::rearm_timeout_s, args[0], 0.0, k_max_seconds, false)};
+        }}};
+
+    attribute<number> cal_s{
+        this, "cal_s", 30.0,
+        description{"The soundcheck window, seconds (default 30, the protocol's track-through): 'calibrate' samples "
+                    "the statistics this long, then ends by itself. Read when a soundcheck begins."},
+        setter{MIN_FUNCTION{
+            return {set_policy_field(&guard_policy::calibrate_s, args[0], 0.0, k_max_seconds, false)};
+        }}};
+
+    attribute<number> cal_margin_d{
+        this, "cal_margin_d", 4.0,
+        description{"The soundcheck's shadow-ratio margin, dB (default 4, MuTap's measurement): the calibrated "
+                    "threshold is the window's median shadow_ratio_db plus this. Read when a soundcheck ends."},
+        setter{MIN_FUNCTION{
+            return {set_policy_field(&guard_policy::cal_d_margin_db, args[0], -120.0, 120.0, false)};
+        }}};
+
+    attribute<number> cal_margin_a{
+        this, "cal_margin_a", 3.0,
+        description{"The soundcheck's uncertainty margin, dB (default 3, MuTap's measurement): the calibrated "
+                    "threshold is the window's median uncertainty_db plus this. Read when a soundcheck ends."},
+        setter{MIN_FUNCTION{
+            return {set_policy_field(&guard_policy::cal_a_margin_db, args[0], -120.0, 120.0, false)};
+        }}};
+
+    /// Zero the learned filter and the block buffers, and return the guard to
+    /// ARMING (applied on the audio thread at the next vector, so it does not
+    /// race the perform routine).
+    message<> reset{this, "reset",
+                    "Reset the canceller: zero the learned feedback-path estimate (and return the guard to ARMING).",
                     MIN_FUNCTION{
                         m_reset_request.store(true, std::memory_order_relaxed);
                         return {};
                     }};
 
-    /// The shadow comparator's smoothing is scaled for the sample rate, so a
-    /// rate change while @shadow is on rebuilds the canceller (with the
-    /// shadow off the engines are rate-agnostic and keep running). min-api
-    /// sets samplerate() before calling this.
+    /// Start the soundcheck (or, with 0, end it early). The audio thread
+    /// begins the guard's sampler at the next vector; when it ends — after
+    /// @cal_s, or on 'calibrate 0' — the guard runs on the calibrated
+    /// thresholds and the right outlet sends 'calibrate_done d_db a_db'.
+    message<> calibrate{
+        this, "calibrate",
+        "Soundcheck: sample the convergence statistics for @cal_s seconds, then run the guard on thresholds of "
+        "median + margin (@cal_margin_d for the shadow ratio, @cal_margin_a for the uncertainty) and send "
+        "'calibrate_done d_db a_db' out of the right outlet. 'calibrate 0' ends it early. Needs the guard running "
+        "(@guard 1 with @kalman 1 and @shadow > 0); otherwise the object posts an error. The calibrated thresholds "
+        "last until the next rebuild or until @d_db or @a_db is set.",
+        MIN_FUNCTION{
+            const bool begin = args.empty() || static_cast<bool>(args[0]);
+            {
+                std::lock_guard<std::mutex> lock(m_control_mutex);
+                if (!m_engine_guard) {
+                    cerr << "calibrate: the guard is not running (@guard 1 needs @kalman 1 and @shadow > 0)" << endl;
+                    return {};
+                }
+            }
+            m_calibration_request.store(begin ? calibration_request::begin : calibration_request::end,
+                                        std::memory_order_relaxed);
+            return {};
+        }};
+
+    /// Clear the guard's back-off (strikes, restore level, latch).
+    message<> clear{this, "clear", "Clear the guard's back-off: strikes 0, restore level 0 dB, latch released.",
+                    MIN_FUNCTION{
+                        m_clear_request.store(true, std::memory_order_relaxed);
+                        return {};
+                    }};
+
+    /// The shadow comparator's smoothing and the guard's timers are scaled for
+    /// the sample rate, so a rate change while @shadow is on rebuilds the
+    /// canceller (with the shadow off the engines are rate-agnostic and keep
+    /// running; the guard needs the shadow). From the first call on, a
+    /// requested guard the engine cannot host is reported. min-api sets
+    /// samplerate() before calling this.
     message<> dspsetup{this, "dspsetup",
                        MIN_FUNCTION{
                            std::lock_guard<std::mutex> lock(m_control_mutex);
+                           m_dsp_seen = true;
                            if (m_constructed && m_shadow != 0 && static_cast<double>(args[0]) != m_engine_sr) {
                                publish();
+                           }
+                           else if (m_guard && !guard_supported()) {
+                               post_guard_refusal();
                            }
                            return {};
                        }};
@@ -324,11 +562,19 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
         return m_engine_shadow;
     }
 
+    /// Whether the most recently built engine carries a guard. Control-side
+    /// state, as built_shadow_partitions(); the unit tests use it.
+    bool built_guard() const {
+        std::lock_guard<std::mutex> lock(m_control_mutex);
+        return m_engine_guard;
+    }
+
     void operator()(audio_bundle input, audio_bundle output) {
         const auto    frames = input.frame_count();
         const double* y_in   = input.samples(0);
         const double* u_in   = input.samples(1);
         double*       out    = output.samples(0);
+        double*       gain   = output.samples(1);
 
         // Adopt a newly published canceller, but only when the trash slot is
         // free to receive the engine we would retire (the control thread reaps
@@ -345,15 +591,18 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
         }
 
         // No canceller (a rebuild failed, or none was ever built): pass the
-        // dry microphone signal through.
+        // dry microphone signal through, at unity gain.
         if (!m_active) {
             for (auto i = 0; i < frames; ++i) {
-                out[i] = y_in[i];
+                const double y = y_in[i];
+                out[i]         = y;
+                gain[i]        = 1.0;
             }
             return;
         }
 
         engine& eng = *m_active;
+        guard_controls(eng);
         std::visit(
             [&](auto& afc) {
                 afc.set_adaptation(m_adapt.load(std::memory_order_relaxed));
@@ -365,24 +614,39 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
                     std::fill(eng.u_block.begin(), eng.u_block.end(), 0.0);
                     std::fill(eng.y_block.begin(), eng.y_block.end(), 0.0);
                     std::fill(eng.e_block.begin(), eng.e_block.end(), 0.0);
+                    std::fill(eng.g_block.begin(), eng.g_block.end(), 1.0);
                     eng.fill = 0;
+                    // A cleared canceller behind an open guard is the
+                    // full-gain cold start ARMING exists to prevent
+                    // (afc_chain::reset() does the same).
+                    if (eng.guard) {
+                        eng.guard->reset();
+                    }
                 }
 
                 // Vector-size bridging: gather into the block buffers, process
                 // every time a block fills, play the processed block back out —
                 // exactly block_size samples of latency, for host vectors smaller
-                // or larger than the block. Inputs are read before the output is
+                // or larger than the block. Inputs are read before the outputs are
                 // written because Max may alias output buffers onto input buffers.
                 const size_t b = afc.block_size();
                 for (auto i = 0; i < frames; ++i) {
                     const double u        = u_in[i];
                     const double y        = y_in[i];
                     out[i]                = eng.e_block[eng.fill];
+                    gain[i]               = eng.g_block[eng.fill];
                     eng.u_block[eng.fill] = u;
                     eng.y_block[eng.fill] = y;
                     if (++eng.fill == b) {
                         afc.process_block(eng.u_block.data(), eng.y_block.data(), eng.e_block.data());
                         eng.fill = 0;
+                        // The guard needs both statistics: it is only ever
+                        // built on the Kalman cores (guard_supported()).
+                        if constexpr (requires { afc.uncertainty_ratio(); }) {
+                            if (eng.guard) {
+                                guard_block(eng, afc.uncertainty_ratio(), afc.shadow_residual_ratio());
+                            }
+                        }
                         if (--m_report_countdown <= 0) {
                             m_report_countdown = k_ipc_report_blocks;
                             // Right to left, Max's outlet order. The NLMS core
@@ -393,9 +657,7 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
                             if constexpr (requires { afc.uncertainty_ratio(); }) {
                                 uncertainty = afc.uncertainty_ratio();
                             }
-                            m_conv_atoms[0] = to_db(uncertainty);
-                            m_conv_atoms[1] = to_db(afc.shadow_residual_ratio());
-                            m_conv_out.send(m_conv_atoms);
+                            report(eng, uncertainty, afc.shadow_residual_ratio());
                             m_ipc_atoms[0] = afc.ipc();
                             m_ipc_out.send(m_ipc_atoms);
                         }
@@ -406,9 +668,154 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     }
 
   private:
+    /// Longest time any of the guard's timing attributes accepts, seconds
+    /// (howl_guard clamps its policy to the same bound).
+    static constexpr double k_max_seconds = 1e6;
+
     /// 10 log10 of a linear power ratio, floored at k_stat_floor so digital
     /// silence and a zero ratio stay finite. Audio thread; allocation-free.
     static double to_db(double ratio) noexcept { return 10.0 * std::log10(std::max(ratio, k_stat_floor)); }
+
+    // ------------------------------------------------- the guard, audio side
+
+    /// Top of every vector: the pending policy, then the host's requests
+    /// (calibrate, clear). Requests that arrive while the engine has no guard
+    /// are dropped, so a stale one never reaches a guard built later.
+    void guard_controls(engine& eng) noexcept {
+        if (m_policy_dirty.load(std::memory_order_acquire) && !m_policy_busy.test_and_set(std::memory_order_acquire)) {
+            const policy_update update = m_policy_slot;
+            m_policy_slot.thresholds   = false;
+            m_policy_dirty.store(false, std::memory_order_relaxed);
+            m_policy_busy.clear(std::memory_order_release);
+            if (eng.guard) {
+                eng.guard->set_policy(update.policy);
+                if (update.thresholds) {
+                    // @d_db / @a_db replace a soundcheck's thresholds.
+                    eng.guard->clear_calibration();
+                }
+            }
+        }
+        const calibration_request request =
+            m_calibration_request.exchange(calibration_request::none, std::memory_order_relaxed);
+        const bool clear_request = m_clear_request.exchange(false, std::memory_order_relaxed);
+        if (!eng.guard) {
+            return;
+        }
+        if (request == calibration_request::begin) {
+            eng.guard->calibrate_begin();
+            eng.calibrating = true;
+        }
+        else if (request == calibration_request::end && eng.calibrating) {
+            finish_calibration(eng);
+        }
+        if (clear_request) {
+            eng.guard->clear();
+        }
+    }
+
+    /// One guard tick on the block just processed: analyse the canceller's
+    /// own residual and statistics, update, apply the mic's gain in place, and
+    /// keep the bus-stage gain for the gain outlet. A soundcheck the guard
+    /// ended by itself (after @cal_s) is applied and reported here.
+    void guard_block(engine& eng, double uncertainty, double shadow) noexcept {
+        guard_type& g = *eng.guard;
+        g.analyze(0, eng.e_block.data(), uncertainty, shadow);
+        g.update();
+        g.apply(0, eng.e_block.data(), eng.e_block.data());
+        const double* bus = g.bus_gain_block();
+        std::copy(bus, bus + eng.g_block.size(), eng.g_block.begin());
+        if (eng.calibrating && !g.calibrating()) {
+            finish_calibration(eng);
+        }
+    }
+
+    /// End the soundcheck: the guard runs on median + margin from the next
+    /// block (calibrate_end(true); a window with no block keeps the current
+    /// thresholds), and the right outlet says which: calibrate_done d_db a_db.
+    void finish_calibration(engine& eng) noexcept {
+        guard_type& g = *eng.guard;
+        g.calibrate_end(true);
+        eng.calibrating       = false;
+        m_calibrated_atoms[1] = g.threshold_d_db(0);
+        m_calibrated_atoms[2] = g.threshold_a_db(0);
+        m_conv_out.send(m_calibrated_atoms);
+    }
+
+    /// The right outlet's report: the two statistics, and with a guard its
+    /// state, gain (dB, end of the block), unprotected flag and strikes.
+    void report(const engine& eng, double uncertainty, double shadow) noexcept {
+        if (!eng.guard) {
+            m_conv_atoms[0] = to_db(uncertainty);
+            m_conv_atoms[1] = to_db(shadow);
+            m_conv_out.send(m_conv_atoms);
+            return;
+        }
+        const guard_type& g = *eng.guard;
+        m_guard_atoms[0]    = to_db(uncertainty);
+        m_guard_atoms[1]    = to_db(shadow);
+        m_guard_atoms[2]    = m_state_names[static_cast<size_t>(g.state(0))];
+        m_guard_atoms[3]    = g.gain_db(0);
+        m_guard_atoms[4]    = g.unprotected(0) ? 1 : 0;
+        m_guard_atoms[5]    = static_cast<long>(g.strikes(0));
+        m_conv_out.send(m_guard_atoms);
+    }
+
+    // ----------------------------------------------- the guard, control side
+
+    /// Whether the engine the current control state builds can host the
+    /// guard: it reads uncertainty_ratio() (the Kalman core's) and the shadow
+    /// comparator's ratio, as afc_chain::set_guard() requires.
+    bool guard_supported() const { return m_kalman && shadow_in_use() > 0; }
+
+    void post_guard_refusal() {
+        cerr << "@guard 1 needs @kalman 1 and @shadow > 0 (the guard reads the Kalman core's uncertainty and the "
+                "shadow comparator's ratio); running without the guard"
+             << endl;
+    }
+
+    /// Hand the attributes' policy to the audio thread (applied at the top of
+    /// the next vector). `thresholds`: @d_db or @a_db changed, so a soundcheck
+    /// calibration is replaced. Caller holds m_control_mutex. The audio thread
+    /// holds the flag only for one struct copy.
+    void push_policy(bool thresholds) {
+        while (m_policy_busy.test_and_set(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        m_policy_slot.policy     = m_policy;
+        m_policy_slot.thresholds = m_policy_slot.thresholds || thresholds;
+        m_policy_dirty.store(true, std::memory_order_release);
+        m_policy_busy.clear(std::memory_order_release);
+    }
+
+    /// Set one double field of the policy (clamped; a non-finite value keeps
+    /// the current one, as howl_guard does), hand it over, and return what the
+    /// guard will run on.
+    double set_policy_field(double guard_policy::*field, double requested, double lo, double hi, bool thresholds) {
+        std::lock_guard<std::mutex> lock(m_control_mutex);
+        if (std::isfinite(requested)) {
+            m_policy.*field = std::clamp(requested, lo, hi);
+        }
+        push_policy(thresholds);
+        return m_policy.*field;
+    }
+
+    /// The guard's configuration for one engine: one microphone at the
+    /// canceller's block and the DSP rate, the attributes' policy, and the
+    /// two detector fields the geometry forces (MuTap's defaults otherwise):
+    /// the band range under k_detector_top x fs, and the growth fit spanning
+    /// at least the 3 blocks howl_detector requires (its 21.3 ms default holds
+    /// up to @block 256 at 44.1 / 48 kHz).
+    guard_type::config make_guard_config(size_t block, double sample_rate) const {
+        guard_type::config cfg;
+        cfg.microphones              = 1;
+        cfg.block_size               = block;
+        cfg.sample_rate              = sample_rate;
+        cfg.policy                   = m_policy;
+        cfg.detector.f_hi_hz         = std::min(cfg.detector.f_hi_hz, k_detector_top * sample_rate);
+        const double three_blocks    = 3.0 * static_cast<double>(block) / sample_rate * (1.0 + 1e-9);
+        cfg.detector.growth_window_s = std::max(cfg.detector.growth_window_s, three_blocks);
+        return cfg;
+    }
 
     /// Partition count of the main filter for the current control state.
     size_t partition_count() const {
@@ -487,8 +894,20 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
                 eng = m_warp ? std::make_unique<engine>(std::in_place_type<warped_afc>, make_config<warped_afc>(sr))
                              : std::make_unique<engine>(std::in_place_type<speech_afc>, make_config<speech_afc>(sr));
             }
+            // The guard, at the canceller's block and this rate. A request the
+            // engine cannot host is reported once DSP has been set up (box
+            // attributes arrive one at a time before that: '@guard 1 @kalman 1'
+            // passes through a guard-without-Kalman state on its way).
+            const bool guarded = m_guard && guard_supported();
+            if (guarded) {
+                eng->guard.emplace(make_guard_config(static_cast<size_t>(m_block_size), sr));
+            }
+            else if (m_guard && m_dsp_seen) {
+                post_guard_refusal();
+            }
             m_engine_sr     = sr;
             m_engine_shadow = shadow_in_use();
+            m_engine_guard  = guarded;
             // A still-unadopted previous pending engine comes back to us here
             // and is deleted — the audio thread only ever sees the newest one.
             delete m_pending.exchange(eng.release(), std::memory_order_acq_rel);
