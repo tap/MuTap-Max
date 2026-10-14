@@ -89,11 +89,24 @@
 #include <vector>
 
 #include "c74_min.h"
+#include "mutap/afc_preset.h"
 #include "mutap/fd_kalman.h"
 #include "mutap/howl_guard.h"
 #include "mutap/pem_afc.h"
 
 using namespace c74::min;
+
+namespace {
+    /// The near-end model and the core of a pem_afc instantiation, so the
+    /// library's preset can be asked for exactly that configuration type.
+    template <typename Afc>
+    struct afc_traits;
+    template <typename Sample, typename Predictor, typename Core>
+    struct afc_traits<tap::mu::pem_afc<Sample, Predictor, Core>> {
+        using predictor = Predictor;
+        using core      = Core;
+    };
+} // namespace
 
 class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     using speech_afc = tap::mu::pem_afc<double>;
@@ -149,16 +162,8 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     /// Most partitions any reachable geometry has (longest filter, smallest
     /// block): @shadow's setter bound. The build clamps to the actual count.
     static constexpr long k_max_partitions = k_max_filter_length / k_min_block;
-    /// Physical time constant of the shadow comparator's residual-power
-    /// smoothing: pem_afc's default retention 0.9742 is exp(-64 / (48000 *
-    /// 0.051)), so this keeps that 51 ms at any @block and sample rate.
-    static constexpr double k_shadow_tau_s = 0.051;
     /// Floor of the linear statistics before the dB conversion (-120 dB).
     static constexpr double k_stat_floor = 1e-12;
-    /// The guard's howl detector keeps its band range under this fraction of
-    /// the sample rate (its default top band, 16 kHz, must stay below
-    /// Nyquist: below 35.6 kHz it is lowered to 0.45 fs).
-    static constexpr double k_detector_top = 0.45;
 
     // State lives ABOVE the attributes on purpose: min-api attribute
     // construction invokes the custom setter with the default value, and
@@ -886,24 +891,15 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
         return m_policy.*field;
     }
 
-    /// The guard's configuration for one engine: one microphone at the
-    /// canceller's block and the DSP rate, the attributes' policy, the
-    /// detector's two deployment calibrations (@ceiling, @loop_ms), and the
-    /// two detector fields the geometry forces (MuTap's defaults otherwise):
-    /// the band range under k_detector_top x fs, and the growth fit spanning
-    /// at least the 3 blocks howl_detector requires (its 21.3 ms default holds
-    /// up to @block 256 at 44.1 / 48 kHz).
+    /// The guard's configuration for one engine: the library's preset (one
+    /// microphone at the canceller's block and the DSP rate, the detector's
+    /// two deployment calibrations @loop_ms and @ceiling in physical units,
+    /// and the two detector fields the geometry forces — MuTap's
+    /// afc_guard_preset, include/mutap/afc_preset.h) plus the attributes'
+    /// policy.
     guard_type::config make_guard_config(size_t block, double sample_rate) const {
-        guard_type::config cfg;
-        cfg.microphones              = 1;
-        cfg.block_size               = block;
-        cfg.sample_rate              = sample_rate;
-        cfg.policy                   = m_policy;
-        cfg.detector.ceiling_db      = m_ceiling_db;
-        cfg.detector.loop_period_s   = m_loop_ms * 1e-3;
-        cfg.detector.f_hi_hz         = std::min(cfg.detector.f_hi_hz, k_detector_top * sample_rate);
-        const double three_blocks    = 3.0 * static_cast<double>(block) / sample_rate * (1.0 + 1e-9);
-        cfg.detector.growth_window_s = std::max(cfg.detector.growth_window_s, three_blocks);
+        auto cfg   = tap::mu::afc_guard_preset<double>(block, sample_rate, m_loop_ms * 1e-3, m_ceiling_db);
+        cfg.policy = m_policy;
         return cfg;
     }
 
@@ -919,49 +915,41 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     /// count in either direction without losing the request).
     size_t shadow_in_use() const { return std::min(static_cast<size_t>(m_shadow), partition_count()); }
 
-    /// The shadow comparator's fields, shared by both core families: the
-    /// clamped partition count and the per-block power retention
-    /// beta = exp(-block / (fs * tau)) that holds tau at k_shadow_tau_s.
-    template <typename Config>
-    void set_shadow(Config& cfg, double sample_rate) const {
-        cfg.shadow_partitions = shadow_in_use();
-        cfg.shadow_smoothing  = std::exp(-static_cast<double>(cfg.fdaf.block_size) / (sample_rate * k_shadow_tau_s));
-    }
-
-    /// Assemble a pem_afc config from the current control-side state; the two
-    /// instantiations share every field this external sets (the predictor
-    /// configs differ, but both have analysis_capacity). The clamping in the
+    /// The library's preset for one instantiation at the current geometry
+    /// and the DSP rate (MuTap's pem_afc_preset, include/mutap/afc_preset.h:
+    /// the pitch search in hertz, the analysis window in seconds, the shadow
+    /// comparator's 51 ms time constant), with @shadow's request in place of
+    /// the preset's default partition count. At 48 kHz this reproduces the
+    /// configuration this object assembled by hand before the preset existed,
+    /// field for field (MuTap tests/test_afc_preset.cpp). The clamping in the
     /// setters keeps every constraint satisfied, so the canceller constructor
     /// does not throw for any reachable combination.
     template <typename Afc>
-    typename Afc::config make_config(double sample_rate) const {
-        typename Afc::config cfg;
-        const auto           b          = static_cast<size_t>(m_block_size);
-        cfg.fdaf.block_size             = b;
-        cfg.fdaf.partitions             = partition_count();
-        cfg.fdaf.step_size              = m_mu.load(std::memory_order_relaxed);
-        cfg.fdaf.ipc_step_scaling       = m_gate || m_warp; // the warped whitener requires the IPC scale
-        cfg.fdaf.transient_freeze_ratio = m_gate ? 4.0 : 0.0;
-        // analysis_window must be a multiple of block_size and >= 2 * block_size;
-        // both operands are powers of two, so the max is always a multiple.
-        cfg.analysis_window             = std::max<size_t>(2 * b, 1024);
-        cfg.predictor.analysis_capacity = std::max(cfg.predictor.analysis_capacity, cfg.analysis_window);
-        set_shadow(cfg, sample_rate);
+    typename Afc::config preset_for(double sample_rate) const {
+        using traits = afc_traits<Afc>;
+        auto cfg     = tap::mu::pem_afc_preset<double, typename traits::predictor, typename traits::core>(
+            static_cast<size_t>(m_block_size), partition_count(), sample_rate);
+        cfg.shadow_partitions = shadow_in_use();
         return cfg;
     }
 
-    /// Same, for the Kalman-core instantiations: no step size and no IPC
-    /// options exist; @gate maps to the opt-in transient (burst) floor.
+    /// The NLMS-core instantiations: the preset plus the attributes' policy
+    /// (@mu, @gate; the warped whitener requires the IPC scale).
+    template <typename Afc>
+    typename Afc::config make_config(double sample_rate) const {
+        auto cfg                        = preset_for<Afc>(sample_rate);
+        cfg.fdaf.step_size              = m_mu.load(std::memory_order_relaxed);
+        cfg.fdaf.ipc_step_scaling       = m_gate || m_warp;
+        cfg.fdaf.transient_freeze_ratio = m_gate ? 4.0 : 0.0;
+        return cfg;
+    }
+
+    /// The Kalman-core instantiations: no step size and no IPC options
+    /// exist; @gate maps to the opt-in transient (burst) floor.
     template <typename Afc>
     typename Afc::config make_kalman_config(double sample_rate) const {
-        typename Afc::config cfg;
-        const auto           b          = static_cast<size_t>(m_block_size);
-        cfg.fdaf.block_size             = b;
-        cfg.fdaf.partitions             = partition_count();
-        cfg.fdaf.transient_floor_ratio  = m_gate ? 8.0 : 0.0;
-        cfg.analysis_window             = std::max<size_t>(2 * b, 1024);
-        cfg.predictor.analysis_capacity = std::max(cfg.predictor.analysis_capacity, cfg.analysis_window);
-        set_shadow(cfg, sample_rate);
+        auto cfg                       = preset_for<Afc>(sample_rate);
+        cfg.fdaf.transient_floor_ratio = m_gate ? 8.0 : 0.0;
         return cfg;
     }
 
