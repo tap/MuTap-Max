@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <numbers>
 #include <string>
 #include <thread>
@@ -40,6 +41,7 @@ namespace {
         size_t                            head{0};
         double                            tone{0.0};
         double                            phase{0.0};
+        bool                              poison{false}; ///< put a NaN in the next vector's first mic sample, once
         std::array<double, k_vector_size> u{};
         std::array<double, k_vector_size> y{};
         std::array<double, k_vector_size> e{};
@@ -58,6 +60,10 @@ namespace {
                     y[i]          = 0.5 * history[head] + tone * std::sin(phase);
                     history[head] = u[i];
                     head          = (head + 1) % k_delay;
+                }
+                if (poison) {
+                    y[0]   = std::numeric_limits<double>::quiet_NaN();
+                    poison = false;
                 }
                 std::array<double*, 2> in{y.data(), u.data()};
                 std::array<double*, 2> outs{e.data(), g.data()};
@@ -155,6 +161,17 @@ namespace {
             }
         }
         return reports;
+    }
+
+    /// The `watchdog n` messages, in order.
+    std::vector<c74::max::t_atom_vector> watchdogs(const c74::max::t_sequence& log) {
+        std::vector<c74::max::t_atom_vector> w;
+        for (const auto& r : log) {
+            if (!r.empty() && name_of(r[0]) == "watchdog") {
+                w.push_back(r);
+            }
+        }
+        return w;
     }
 
     /// The calibrate_done messages, in order.
@@ -1032,17 +1049,84 @@ SCENARIO("mutap.afc~'s @ceiling decides whether a steady near-end tone trips the
         THEN("at the default ceiling the tone never trips; at -20 dB it trips from the first report on") {
             REQUIRE(at_default.size() == count);
             REQUIRE(at_low.size() == count);
-            // Measured: at -6 dB, 0 strikes in all 258 reports; the guard
-            // leaves ARMING (open at report 50 - the tone moves the statistics
-            // under the verdict's thresholds - then a lost-verdict duck and a
-            // release, no strike). At -20 dB, ARMING in every report with 8
-            // strikes at report 0 and 30 (the strike counter's cap) from 25 on.
+            // Measured (MuTap 9a27f2e; mock rate 44.1 kHz, @block 256): at
+            // -6 dB the detector never trips. The guard leaves ARMING (open
+            // at report 47 - the tone moves the statistics under the
+            // verdict's thresholds), then a lost-verdict duck at report 143,
+            // inside the 10 s probation, which is ONE strike since MuTap's
+            // lost_in_probation_strikes defaulted on (tap/MuTap#88; at the
+            // previous pin, 449cf6c, that duck released with no strike), and
+            // the doubled re-arm timer keeps it ducked for the rest of the
+            // 12 s. So: at most one strike, and the guard opened before it.
+            // At -20 dB, ARMING in every report with 8 strikes at report 0
+            // and 30 (the strike counter's cap) from 25 on.
             REQUIRE(
-                std::all_of(at_default.begin(), at_default.end(), [](const auto& r) { return value(r[5]) == 0.0; }));
-            REQUIRE(std::any_of(at_default.begin(), at_default.end(),
-                                [](const auto& r) { return name_of(r[2]) != "arming"; }));
+                std::all_of(at_default.begin(), at_default.end(), [](const auto& r) { return value(r[5]) <= 1.0; }));
+            const auto first_open = std::find_if(at_default.begin(), at_default.end(),
+                                                 [](const auto& r) { return name_of(r[2]) == "open"; });
+            REQUIRE(first_open != at_default.end());
+            REQUIRE(std::all_of(at_default.begin(), first_open, [](const auto& r) { return value(r[5]) == 0.0; }));
             REQUIRE(std::all_of(at_low.begin(), at_low.end(),
                                 [](const auto& r) { return name_of(r[2]) == "arming" && value(r[5]) >= 1.0; }));
+        }
+    }
+}
+
+// MuTap's NaN watchdog (include/mutap/watchdog.h) through the glue: a NaN in
+// the microphone resets the canceller, comes out as one block of silence,
+// and the right outlet says `watchdog n` once per count, never otherwise.
+
+SCENARIO("mutap.afc~ reports the NaN watchdog as 'watchdog n' on the right outlet") {
+    ext_main(nullptr);
+
+    GIVEN("a default instance driven 32 blocks, one NaN in the microphone, then 32 blocks") {
+        // 64 blocks: 8 convergence reports + 1 watchdog message on the right
+        // outlet, 8 IPC reports.
+        const auto log = run_logged(9, 8, [](mutap_afc& my_object, room& the_room) {
+            the_room.drive(my_object, 32 * 256);
+            the_room.poison = true;
+            the_room.drive(my_object, 32 * 256);
+        });
+        const auto w   = watchdogs(log.reports);
+
+        THEN("exactly one 'watchdog 1' arrives") {
+            REQUIRE(w.size() == 1);
+            REQUIRE(w[0].size() == 2);
+            REQUIRE(value(w[0][1]) == 1.0);
+        }
+        THEN("the cleaned output never carries a non-finite sample") {
+            REQUIRE(!log.out.empty());
+            REQUIRE(std::all_of(log.out.begin(), log.out.end(), [](double v) { return std::isfinite(v); }));
+        }
+    }
+
+    GIVEN("a healthy instance driven 64 blocks") {
+        const auto log =
+            run_logged(8, 8, [](mutap_afc& my_object, room& the_room) { the_room.drive(my_object, 64 * 256); });
+
+        THEN("no watchdog message is sent") {
+            REQUIRE(watchdogs(log.reports).empty());
+        }
+    }
+
+    GIVEN("the guard running (@kalman 1 @shadow 2 @guard 1), the same NaN") {
+        const auto log = run_logged(9, 8, [](mutap_afc& my_object, room& the_room) {
+            my_object.kalman = true;
+            my_object.guard  = true;
+            the_room.drive(my_object, 32 * 256);
+            the_room.poison = true;
+            the_room.drive(my_object, 32 * 256);
+        });
+        const auto w   = watchdogs(log.reports);
+
+        THEN("one 'watchdog 1': the canceller's trip, counted once; the guard saw the zeros and is back in ARMING") {
+            REQUIRE(w.size() == 1);
+            REQUIRE(value(w[0][1]) == 1.0);
+            const auto reports = guard_reports(log.reports);
+            REQUIRE(reports.size() == 8);
+            // The 4th report is the last before the NaN (block 32); the 5th
+            // the first after it: ARMING, whatever the state was before.
+            REQUIRE(name_of(reports[4][2]) == "arming");
         }
     }
 }

@@ -94,10 +94,11 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
     /// which never allocates.
     struct engine {
         std::variant<speech_aec, warped_aec, kalman_speech_aec, kalman_warped_aec, chain_aec, nn_chain_aec> aec;
-        std::vector<double> x_block; ///< gathering far-end (reference) samples
-        std::vector<double> y_block; ///< gathering microphone samples
-        std::vector<double> e_block; ///< last processed block, being played out
-        size_t              fill{0}; ///< samples gathered so far, == play-out position
+        std::vector<double> x_block;              ///< gathering far-end (reference) samples
+        std::vector<double> y_block;              ///< gathering microphone samples
+        std::vector<double> e_block;              ///< last processed block, being played out
+        size_t              fill{0};              ///< samples gathered so far, == play-out position
+        size_t              watchdog_reported{0}; ///< the last `watchdog n` sent for this engine
 
         template <typename Aec>
         explicit engine(std::in_place_type_t<Aec> which, const typename Aec::config& cfg, size_t block)
@@ -150,6 +151,7 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
     engine* m_active{nullptr};
     long    m_report_countdown{k_ipc_report_blocks};
     atoms   m_ipc_atoms{0.0};
+    atoms   m_watchdog_atoms{symbol{"watchdog"}, 0}; ///< watchdog n (the NaN watchdog's count)
 
   public:
     MIN_DESCRIPTION{"Acoustic echo canceller. Subtracts an adaptive estimate of the "
@@ -172,7 +174,8 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
     inlet<>  m_in_mic{this, "(signal) microphone signal y (echo + near end)"};
     inlet<>  m_in_ref{this, "(signal) far-end / reference signal x (the signal sent to the loudspeaker)"};
     outlet<> m_out{this, "(signal) cleaned signal e = y - estimated echo", "signal"};
-    outlet<thread_check::scheduler, thread_action::fifo> m_ipc_out{this, "(float) IPC double-talk indicator, 0..1"};
+    outlet<thread_check::scheduler, thread_action::fifo> m_ipc_out{
+        this, "(float) IPC double-talk indicator, 0..1 (echo-explained fraction with a post-filter); watchdog n"};
 
     /// First creation argument is the echo-path filter length in samples
     /// (default 2048); partitions = ceil(filter_length / block size).
@@ -438,6 +441,15 @@ class mutap_aec : public object<mutap_aec>, public vector_operator<> {
                     if (++eng.fill == b) {
                         aec.process_block(eng.x_block.data(), eng.y_block.data(), eng.e_block.data());
                         eng.fill = 0;
+                        // The NaN watchdog (MuTap watchdog.h): every engine
+                        // counts the blocks a NaN or infinity reached it (a
+                        // chain counts a stage's trip once); report the count
+                        // on the right outlet as `watchdog n` when it moves.
+                        if (const size_t trips = aec.watchdog_trips(); trips != eng.watchdog_reported) {
+                            eng.watchdog_reported = trips;
+                            m_watchdog_atoms[1]   = static_cast<long>(trips);
+                            m_ipc_out.send(m_watchdog_atoms);
+                        }
                         if (--m_report_countdown <= 0) {
                             m_report_countdown = k_ipc_report_blocks;
                             if constexpr (requires { aec.ipc(); }) {
