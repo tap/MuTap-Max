@@ -36,7 +36,13 @@ Early scaffold. Two objects so far:
   `shadow_ratio_db` is the main filter's residual power over the shadow
   comparator's (see `shadow`): below 0 dB while the long filter out-cancels
   the short fast one, rising toward and past 0 dB when the path moves; it
-  reads 0 dB with `@shadow 0`. Without the guard the external applies **no
+  reads 0 dB with `@shadow 0`. The same outlet sends **`watchdog n`**
+  whenever MuTap's NaN watchdog trips (`include/mutap/watchdog.h`): a NaN or
+  infinity that reached the canceller — a divide by zero in the patch, a
+  disconnected inlet — resets it as `reset` does, sends the guard back to
+  ARMING, comes out as one block of silence, and counts; `n` is the count
+  since the engine was built (the canceller's trips plus the guard's), sent
+  only when it moves, so a healthy patch never hears it. Without the guard the external applies **no
   thresholds** — that is the patch's policy; MuTap's `pem_afc.h` and `fd_kalman.h` record
   what each statistic was measured to catch and miss, and the help patcher
   carries an example policy with its calibration conditions. Creation arg:
@@ -150,6 +156,10 @@ Early scaffold. Two objects so far:
   in the MuTap test suite (`tests/test_aec.cpp`: at 0 dB double-talk the
   naive update is kicked past useless while the Kalman core holds a deep
   estimate with ~13 dB echo suppression through the segment, config-free).
+  Its right outlet (the IPC, or the echo-explained fraction with a
+  post-filter) also sends **`watchdog n`** whenever MuTap's NaN watchdog
+  trips, as `mutap.afc~`'s does: the engine resets, outputs one block of
+  silence, and `n` counts since it was built.
   `@postfilter 1` engages the full measured **AEC chain** — the raw Kalman
   canceller plus MuTap's coherence-driven residual suppressor, comfort
   noise matched to the room's noise floor, and the initial receive guard:

@@ -44,6 +44,14 @@
 /// attributes are copied into a pending slot and applied by the audio thread
 /// at the top of the next vector; the main thread never touches a live guard.
 ///
+/// THE NaN WATCHDOG (MuTap's include/mutap/watchdog.h): a NaN or infinity
+/// reaching the canceller — from a patch's divide by zero, a disconnected
+/// inlet — resets it as `reset` does (and sends the guard to ARMING), comes
+/// out as one block of silence, and counts. The rightmost outlet reports the
+/// count as `watchdog n` whenever it moves (the canceller's trips plus the
+/// guard's, since the engine was built; never otherwise, so a healthy patch
+/// hears nothing). A rebuild starts a fresh count.
+///
 /// The canceller works on fixed blocks of @block samples, independent of the
 /// host signal vector size: the perform routine gathers samples into
 /// constructor-allocated block buffers, calls process_block() every time a
@@ -106,13 +114,14 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     /// emplaced in place and the engine lives behind a pointer.
     struct engine {
         std::variant<speech_afc, warped_afc, kalman_speech_afc, kalman_warped_afc> afc;
-        std::vector<double>       u_block;            ///< gathering reference (loudspeaker) samples
-        std::vector<double>       y_block;            ///< gathering microphone samples
-        std::vector<double>       e_block;            ///< last processed block (guarded), being played out
-        std::vector<double>       g_block;            ///< its bus-stage gain, being played out (1 without a guard)
-        std::optional<guard_type> guard;              ///< the safety layer, when @guard is on and supported
-        size_t                    fill{0};            ///< samples gathered so far, == play-out position
-        bool                      calibrating{false}; ///< a soundcheck is running (audio thread)
+        std::vector<double>       u_block;              ///< gathering reference (loudspeaker) samples
+        std::vector<double>       y_block;              ///< gathering microphone samples
+        std::vector<double>       e_block;              ///< last processed block (guarded), being played out
+        std::vector<double>       g_block;              ///< its bus-stage gain, being played out (1 without a guard)
+        std::optional<guard_type> guard;                ///< the safety layer, when @guard is on and supported
+        size_t                    fill{0};              ///< samples gathered so far, == play-out position
+        bool                      calibrating{false};   ///< a soundcheck is running (audio thread)
+        size_t                    watchdog_reported{0}; ///< the last `watchdog n` sent for this engine
 
         template <typename Afc>
         explicit engine(std::in_place_type_t<Afc> which, const typename Afc::config& cfg)
@@ -214,20 +223,23 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
     /// uncertainty_db shadow_ratio_db guard_state gain_db unprotected strikes
     atoms m_guard_atoms{0.0, 0.0, symbol{"arming"}, 0.0, 0, 0};
     atoms m_calibrated_atoms{symbol{"calibrate_done"}, 0.0, 0.0}; ///< calibrate_done d_db a_db
+    atoms m_watchdog_atoms{symbol{"watchdog"}, 0};                ///< watchdog n (the NaN watchdog's count)
 
   public:
-    MIN_DESCRIPTION{"Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the "
-                    "loudspeaker-to-microphone feedback path from the microphone signal, adapted "
-                    "with PEM prewhitening so the closed loop does not bias the estimate "
-                    "(FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the "
-                    "signal feeding the loudspeaker; the cleaned output is delayed by @block samples. "
-                    "The second outlet carries the guard's post-reverb gain (1 with the guard off); the "
-                    "third reports the IPC double-talk indicator (0..1); the right outlet reports two raw "
-                    "convergence statistics in dB (uncertainty_db shadow_ratio_db), plus the guard's "
-                    "state with @guard on. @warp selects the frequency-warped near-end model for "
-                    "music/tonal sources; @kalman selects the frequency-domain Kalman engine (v2); "
-                    "@shadow sizes the shadow comparator; @guard adds the anti-howl safety layer "
-                    "(MuTap howl_guard: arming, duck, re-arm, back-off, soundcheck calibration, cap)."};
+    MIN_DESCRIPTION{
+        "Acoustic feedback (howling) canceller. Subtracts an adaptive estimate of the "
+        "loudspeaker-to-microphone feedback path from the microphone signal, adapted "
+        "with PEM prewhitening so the closed loop does not bias the estimate "
+        "(FDAF-PEM-AFROW, MuTap pem_afc). Inlet 1 takes the microphone, inlet 2 the "
+        "signal feeding the loudspeaker; the cleaned output is delayed by @block samples. "
+        "The second outlet carries the guard's post-reverb gain (1 with the guard off); the "
+        "third reports the IPC double-talk indicator (0..1); the right outlet reports two raw "
+        "convergence statistics in dB (uncertainty_db shadow_ratio_db), plus the guard's "
+        "state with @guard on, and 'watchdog n' whenever a NaN or infinity reached the "
+        "canceller (it resets and outputs one block of silence). @warp selects the frequency-warped near-end model for "
+        "music/tonal sources; @kalman selects the frequency-domain Kalman engine (v2); "
+        "@shadow sizes the shadow comparator; @guard adds the anti-howl safety layer "
+        "(MuTap howl_guard: arming, duck, re-arm, back-off, soundcheck calibration, cap)."};
     MIN_TAGS{"audio, adaptive, feedback, howling, cleaning"};
     MIN_AUTHOR{"MuTap contributors"};
     MIN_RELATED{"adc~, dac~, adoutput~"};
@@ -239,7 +251,8 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
                         "signal"};
     outlet<thread_check::scheduler, thread_action::fifo> m_ipc_out{this, "(float) IPC double-talk indicator, 0..1"};
     outlet<thread_check::scheduler, thread_action::fifo> m_conv_out{
-        this, "(list) uncertainty_db shadow_ratio_db [guard_state gain_db unprotected strikes]; calibrate_done"};
+        this,
+        "(list) uncertainty_db shadow_ratio_db [guard_state gain_db unprotected strikes]; calibrate_done; watchdog n"};
 
     /// First creation argument is the feedback-path filter length in samples
     /// (default 2048); partitions = ceil(filter_length / block size).
@@ -703,6 +716,7 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
                                 guard_block(eng, afc.uncertainty_ratio(), afc.shadow_residual_ratio());
                             }
                         }
+                        report_watchdog(eng, afc.watchdog_trips());
                         if (--m_report_countdown <= 0) {
                             m_report_countdown = k_ipc_report_blocks;
                             // Right to left, Max's outlet order. The NLMS core
@@ -814,6 +828,23 @@ class mutap_afc : public object<mutap_afc>, public vector_operator<> {
         m_guard_atoms[4]    = g.unprotected(0) ? 1 : 0;
         m_guard_atoms[5]    = static_cast<long>(g.strikes(0));
         m_conv_out.send(m_guard_atoms);
+    }
+
+    /// The NaN watchdog's count for this engine — the canceller's trips
+    /// (pem_afc::watchdog_trips(): one per block that reached it non-finite,
+    /// a core trip on the prewhitened pair counted once) plus the guard's
+    /// (howl_guard::watchdog_trips(0)) — sent as `watchdog n` on the right
+    /// outlet when it moves. Audio thread; allocation-free.
+    void report_watchdog(engine& eng, size_t canceller_trips) noexcept {
+        size_t trips = canceller_trips;
+        if (eng.guard) {
+            trips += eng.guard->watchdog_trips(0);
+        }
+        if (trips != eng.watchdog_reported) {
+            eng.watchdog_reported = trips;
+            m_watchdog_atoms[1]   = static_cast<long>(trips);
+            m_conv_out.send(m_watchdog_atoms);
+        }
     }
 
     // ----------------------------------------------- the guard, control side
